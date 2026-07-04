@@ -36,6 +36,38 @@ class Meter:
         """1-based musician-style beat position within the bar."""
         return start - self.bar_of(start) * self.bar_quarters + 1.0
 
+    @property
+    def slots(self) -> int:
+        """Grid slots per bar (16 in 4/4)."""
+        return round(self.bar_quarters / GRID)
+
+    def slot_of(self, start: float) -> int:
+        """Grid slot within the bar for a beat position."""
+        return round((start - self.bar_of(start) * self.bar_quarters) / GRID)
+
+    def metric_weights(self) -> tuple[float, ...]:
+        """Accent hierarchy per grid slot (PLANS.md §5.4): downbeat 4.0,
+        mid-bar beat 3.5, other beats 3.0, 8th offbeats 2.0, 16ths 1.0."""
+        slots_per_beat = max(1, round((4.0 / self.denominator) / GRID))
+        half_beat = max(1, slots_per_beat // 2)
+        out = []
+        for s in range(self.slots):
+            if s == 0:
+                out.append(4.0)
+            elif s % slots_per_beat == 0:
+                beat = s // slots_per_beat
+                is_mid = self.numerator % 2 == 0 and beat == self.numerator // 2
+                out.append(3.5 if is_mid else 3.0)
+            elif s % half_beat == 0:
+                out.append(2.0)
+            else:
+                out.append(1.0)
+        return tuple(out)
+
+    def strong_slots(self) -> tuple[int, ...]:
+        """Slots carrying beat-level weight (chord-tone rules key off these)."""
+        return tuple(s for s, w in enumerate(self.metric_weights()) if w >= 3.0)
+
 
 @dataclass
 class NoteEvent:

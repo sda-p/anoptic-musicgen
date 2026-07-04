@@ -1,24 +1,28 @@
 from musicgen.theory.chords import Chord
 from musicgen.theory.scales import Scale
-from musicgen.theory.voicing import VoicingConfig, select_voice_pcs, voice_chord
+from musicgen.theory.voicing import VoicingConfig, select_voice_pcs, voice_chord, voice_pc_options
 
 CFG = VoicingConfig()
 C_IONIAN = Scale(0, "ionian")
 
 
-def test_select_doubles_root_never_third():
-    assert sorted(select_voice_pcs((0, 4, 7), 4)) == [0, 0, 4, 7]
-    assert sorted(select_voice_pcs((0, 4, 7), 5)) == [0, 0, 4, 7, 7]
+def test_doubling_options_prefer_root_then_fifth_never_third():
+    options = voice_pc_options((0, 4, 7), 4)
+    assert sorted(options[0]) == [0, 0, 4, 7]      # preferred: doubled root
+    assert sorted(options[1]) == [0, 4, 7, 7]      # alternative: doubled fifth
+    assert all(sorted(o).count(4) == 1 for o in options), "never double the third"
+    assert select_voice_pcs((0, 4, 7), 4) == options[0]
 
 
-def test_select_drops_fifth_first():
+def test_drop_options_prefer_fifth_then_root():
     ninth = Chord(5, ("7", "9")).pitch_classes(C_IONIAN)  # (7, 11, 2, 5, 9)
-    picked = select_voice_pcs(ninth, 4)
-    assert sorted(picked) == sorted((7, 11, 5, 9))  # fifth (2) dropped
+    options = voice_pc_options(ninth, 4)
+    assert sorted(options[0]) == sorted((7, 11, 5, 9))   # fifth (2) dropped
+    assert sorted(options[1]) == sorted((11, 2, 5, 9))   # root dropped (bass covers it)
 
 
 def test_seventh_chord_uses_all_members():
-    assert sorted(select_voice_pcs((7, 11, 2, 5), 4)) == [2, 5, 7, 11]
+    assert voice_pc_options((7, 11, 2, 5), 4) == ((7, 11, 2, 5),)
 
 
 def test_first_voicing_centered_and_ascending():

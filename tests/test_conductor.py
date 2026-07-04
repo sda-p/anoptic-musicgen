@@ -65,6 +65,34 @@ def test_layer_gating():
     assert {e.layer for e in events} == {"pad"}
 
 
+FULL_LAYERS = ("pad", "bass", "melody", "arp", "perc")
+
+
+def test_full_texture_64_bars_lint_clean():
+    _, events, contexts = _run(bars=64, params=MusicalParams(layers=FULL_LAYERS))
+    assert {e.layer for e in events} == set(FULL_LAYERS)
+    violations = lint(events, contexts)
+    assert violations == [], "\n".join(map(str, violations))
+
+
+def test_full_texture_across_seeds_modes_densities():
+    for seed in (1, 2):
+        for mode in ("ionian", "dorian", "aeolian"):
+            for density in (0.25, 0.55, 0.85):
+                params = MusicalParams(note_density=density, roughness=density * 0.7, layers=FULL_LAYERS)
+                _, events, contexts = _run(seed=seed, bars=16, mode=mode, params=params)
+                violations = lint(events, contexts)
+                assert violations == [], (
+                    f"seed {seed} {mode} density {density}:\n" + "\n".join(map(str, violations))
+                )
+
+
+def test_full_texture_deterministic():
+    _, a, _ = _run(seed=11, bars=16, params=MusicalParams(layers=FULL_LAYERS))
+    _, b, _ = _run(seed=11, bars=16, params=MusicalParams(layers=FULL_LAYERS))
+    assert a == b
+
+
 def test_borrowed_chords_render_when_dark():
     # Low valence in a bright mode must still lint clean (borrowed pcs are
     # licensed by role, chord-tone checks use the borrowed pcs).
