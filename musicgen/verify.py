@@ -18,8 +18,9 @@ from typing import Sequence
 from musicgen.ir import GRID, HarmonicContext, Meter, NoteEvent
 from musicgen.theory.pitch import pitch_name
 
-# Roles that license a pitch outside the bar's scale.
-CHROMATIC_ROLES = {"approach", "borrowed", "chromatic"}
+# Roles that license a pitch outside the bar's scale. "echo" covers modifier
+# repeats bleeding into the next bar's harmony (reverb-like, not a wrong note).
+CHROMATIC_ROLES = {"approach", "borrowed", "chromatic", "echo"}
 # Roles that license a non-chord tone (melodic embellishment etc.).
 LICENSED_NONCHORD = CHROMATIC_ROLES | {"passing", "neighbor", "pedal", "appoggiatura"}
 
@@ -70,7 +71,8 @@ def _lint_events(events, ctx_by_bar, meter, stage, out) -> None:
 
         ctx = ctx_by_bar.get(bar)
         if ctx is None:
-            out.append(Violation("context", bar, f"no HarmonicContext covers {ev.layer} {pitch_name(ev.pitch)}"))
+            if ev.role != "echo":  # echo tails may ring past the last bar
+                out.append(Violation("context", bar, f"no HarmonicContext covers {ev.layer} {pitch_name(ev.pitch)}"))
             continue
         is_chord_member = bool(ctx.chord_pcs) and ev.pitch % 12 in ctx.chord_pcs
         if not ctx.scale.contains(ev.pitch) and not is_chord_member and ev.role not in CHROMATIC_ROLES:
@@ -81,7 +83,9 @@ def _lint_events(events, ctx_by_bar, meter, stage, out) -> None:
                 f"{pitch_name(ev.pitch)} ({ev.layer}) not in {ctx.scale.name}, not a member of "
                 f"{ctx.chord_sym or 'the chord'}, and role {ev.role!r} does not license chromaticism",
             ))
-        if ev.degree is not None and ctx.scale.degree_of(ev.pitch) != ev.degree:
+        if ev.degree is not None and ctx.scale.degree_of(ev.pitch) != ev.degree and ev.role != "echo":
+            # echoes keep their source bar's annotations; the harmony (and
+            # even the mode) may have moved on underneath them
             out.append(Violation(
                 "degree", bar,
                 f"{pitch_name(ev.pitch)} annotated ^{ev.degree} but is "
@@ -89,18 +93,21 @@ def _lint_events(events, ctx_by_bar, meter, stage, out) -> None:
             ))
 
 
-def _lint_pad(events, ctx_by_bar, meter, limits, out) -> None:
+def _lint_pad(events, ctx_by_bar, meter, limits, stage, out) -> None:
     pads = sorted((e for e in events if e.layer == "pad"), key=lambda e: (e.start, e.pitch))
     groups: dict[float, list[NoteEvent]] = {}
     for ev in pads:
         groups.setdefault(ev.start, []).append(ev)
 
+    # Voicing analysis (unison doubling, voice movement) needs simultaneous
+    # chords — Strum staggers starts, so these rules are pre-modifier only.
+    voicing_rules = stage == "pre"
     lo, hi = limits.pad_range
     prev_pitches: list[int] | None = None
     for start in sorted(groups):
         pitches = [e.pitch for e in groups[start]]
         bar = meter.bar_of(start)
-        if any(b == a for a, b in zip(pitches, pitches[1:])):
+        if voicing_rules and any(b == a for a, b in zip(pitches, pitches[1:])):
             out.append(Violation("unison", bar, f"pad voicing doubles a unison: {[pitch_name(p) for p in pitches]}"))
         for p in pitches:
             if not lo <= p <= hi:
@@ -110,7 +117,7 @@ def _lint_pad(events, ctx_by_bar, meter, limits, out) -> None:
             for p in pitches:
                 if p % 12 not in ctx.chord_pcs:
                     out.append(Violation("chord-tone", bar, f"pad {pitch_name(p)} is not a member of {ctx.chord_sym} (pcs {ctx.chord_pcs})"))
-        if prev_pitches is not None and len(prev_pitches) == len(pitches):
+        if voicing_rules and prev_pitches is not None and len(prev_pitches) == len(pitches):
             for i, (a, b) in enumerate(zip(prev_pitches, pitches)):
                 if abs(b - a) > limits.max_voice_move:
                     out.append(Violation(
@@ -219,7 +226,7 @@ def lint(
     ctx_by_bar = {c.bar: c for c in contexts}
     out: list[Violation] = []
     _lint_events(events, ctx_by_bar, meter, stage, out)
-    _lint_pad(events, ctx_by_bar, meter, limits, out)
+    _lint_pad(events, ctx_by_bar, meter, limits, stage, out)
     _lint_bass(events, ctx_by_bar, meter, limits, out)
     if stage == "pre":  # slot-based melodic analysis assumes the unmodified grid
         _lint_melody(events, ctx_by_bar, meter, limits, out)

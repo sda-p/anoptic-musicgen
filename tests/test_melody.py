@@ -14,7 +14,7 @@ def _run(seed=42, bars=32, **kwargs):
     kwargs.setdefault("params", FULL)
     engine = MusicEngine(seed=seed, config=EngineConfig(**kwargs))
     results = [engine.advance_bar() for _ in range(bars)]
-    events = [ev for r in results for ev in r.events]
+    events = [ev for r in results for ev in r.raw_events]  # pre-modifier IR
     return results, events, [r.context for r in results]
 
 

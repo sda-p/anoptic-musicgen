@@ -11,19 +11,27 @@ def _run(seed=42, bars=32, **config_kwargs):
     return results, events, contexts
 
 
+def _lint_all(results):
+    """Grid/melodic rules on the pre-modifier IR, bounds on what plays."""
+    contexts = [r.context for r in results]
+    raw = [ev for r in results for ev in r.raw_events]
+    final = [ev for r in results for ev in r.events]
+    return lint(raw, contexts, stage="pre") + lint(final, contexts, stage="post")
+
+
 def test_32_bars_lint_clean():
     results, events, contexts = _run()
     assert events, "generator produced no events"
     assert len(contexts) == 32
-    violations = lint(events, contexts)
+    violations = _lint_all(results)
     assert violations == [], "\n".join(map(str, violations))
 
 
 def test_lint_clean_across_seeds_and_modes():
     for seed in (1, 2, 3):
         for mode in ("ionian", "dorian", "aeolian"):
-            _, events, contexts = _run(seed=seed, bars=16, mode=mode)
-            violations = lint(events, contexts)
+            results, _, _ = _run(seed=seed, bars=16, mode=mode)
+            violations = _lint_all(results)
             assert violations == [], f"seed {seed} {mode}:\n" + "\n".join(map(str, violations))
 
 
@@ -69,9 +77,9 @@ FULL_LAYERS = ("pad", "bass", "melody", "arp", "perc")
 
 
 def test_full_texture_64_bars_lint_clean():
-    _, events, contexts = _run(bars=64, params=MusicalParams(layers=FULL_LAYERS))
+    results, events, contexts = _run(bars=64, params=MusicalParams(layers=FULL_LAYERS))
     assert {e.layer for e in events} == set(FULL_LAYERS)
-    violations = lint(events, contexts)
+    violations = _lint_all(results)
     assert violations == [], "\n".join(map(str, violations))
 
 
@@ -80,8 +88,8 @@ def test_full_texture_across_seeds_modes_densities():
         for mode in ("ionian", "dorian", "aeolian"):
             for density in (0.25, 0.55, 0.85):
                 params = MusicalParams(note_density=density, roughness=density * 0.7, layers=FULL_LAYERS)
-                _, events, contexts = _run(seed=seed, bars=16, mode=mode, params=params)
-                violations = lint(events, contexts)
+                results, _, _ = _run(seed=seed, bars=16, mode=mode, params=params)
+                violations = _lint_all(results)
                 assert violations == [], (
                     f"seed {seed} {mode} density {density}:\n" + "\n".join(map(str, violations))
                 )
@@ -96,6 +104,6 @@ def test_full_texture_deterministic():
 def test_borrowed_chords_render_when_dark():
     # Low valence in a bright mode must still lint clean (borrowed pcs are
     # licensed by role, chord-tone checks use the borrowed pcs).
-    _, events, contexts = _run(seed=5, bars=32, valence=-0.9)
-    violations = lint(events, contexts)
+    results, _, _ = _run(seed=5, bars=32, valence=-0.9)
+    violations = _lint_all(results)
     assert violations == [], "\n".join(map(str, violations))

@@ -54,9 +54,11 @@ def main() -> None:
 
     results = [engine.advance_bar() for _ in range(args.bars)]
     events = [ev for r in results for ev in r.events]
+    raw = [ev for r in results for ev in r.raw_events]
     contexts = [r.context for r in results]
 
-    verify.assert_clean(events, contexts, config.meter, stage="pre")
+    verify.assert_clean(raw, contexts, config.meter, stage="pre")
+    verify.assert_clean(events, contexts, config.meter, stage="post")
 
     stem = f"m2_full_{args.mode}_s{args.seed}"
     mid = midi_io.write_midi(

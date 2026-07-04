@@ -149,7 +149,10 @@ def verify_roundtrip(path: str | Path, events: Sequence[NoteEvent], tol_beats: f
     Returns a list of problems (empty == clean)."""
     problems: list[str] = []
     got = read_notes(path)
-    want = sorted(events, key=lambda e: (e.start, LAYER_MIDI[e.layer].channel, e.pitch))
+    # Sort by quantized tick, not float start: sub-tick differences (humanize)
+    # must not reorder the written side relative to the read-back side.
+    want = sorted(events, key=lambda e: (beats_to_ticks(e.start), LAYER_MIDI[e.layer].channel, e.pitch))
+    got = sorted(got, key=lambda n: (round(n.start * PPQ), n.channel, n.pitch))
     if len(got) != len(want):
         problems.append(f"note count: wrote {len(want)}, read back {len(got)}")
     for w, g in zip(want, got):

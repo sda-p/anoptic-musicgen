@@ -81,3 +81,23 @@ class Scale:
     @property
     def name(self) -> str:
         return f"{PC_SHARP[self.tonic]} {self.mode}"
+
+
+def snap_to_scale(scale: Scale, pitch: int) -> int:
+    """Nearest scale tone (upward preference on ties)."""
+    for delta in (0, 1, -1, 2, -2):
+        if scale.contains(pitch + delta):
+            return pitch + delta
+    return pitch
+
+
+def diatonic_shift(scale: Scale, pitch: int, steps: int) -> int:
+    """Walk N scale steps from a pitch (snapped to the scale first)."""
+    p = snap_to_scale(scale, pitch)
+    direction = 1 if steps > 0 else -1
+    for _ in range(abs(steps)):
+        q = p + direction
+        while not scale.contains(q):
+            q += direction
+        p = q
+    return p

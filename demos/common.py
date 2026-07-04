@@ -23,9 +23,11 @@ def emit(
     quiet: bool = False,
 ) -> dict[str, Path]:
     events = [ev for r in results for ev in r.events]
+    raw = [ev for r in results for ev in r.raw_events]
     contexts = [r.context for r in results]
 
-    verify.assert_clean(events, contexts, meter, stage="pre")
+    verify.assert_clean(raw, contexts, meter, stage="pre")     # grid + melodic rules
+    verify.assert_clean(events, contexts, meter, stage="post")  # bounds on what plays
 
     tempo_points = [p for r in results for p in r.tempo_points]
     if not tempo_points:

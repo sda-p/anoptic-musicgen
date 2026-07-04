@@ -29,7 +29,8 @@ from musicgen.gen.bass import BassConfig, generate_bass
 from musicgen.gen.melody import MelodyConfig, MelodyState, Motif, generate_melody, make_motif
 from musicgen.gen.pad import generate_pad
 from musicgen.gen.perc import PercConfig, generate_perc
-from musicgen.ir import HarmonicContext, Meter, MusicalParams, NoteEvent
+from musicgen.ir import LAYER_NAMES, HarmonicContext, Meter, MusicalParams, NoteEvent
+from musicgen.modifiers import apply_chain, default_chains
 from musicgen.rng import Seeder
 from musicgen.theory.chords import Chord
 from musicgen.theory.harmony import HarmonyConfig, next_chord
@@ -51,6 +52,7 @@ class EngineConfig:
     phrase_bars: int = 8
     cadence_policies: tuple[str, ...] | None = None  # None: tension-driven (mapper) / default cycle (static)
     mapper: MappingTable | None = None
+    chains: dict[str, tuple] = field(default_factory=default_chains)  # {} disables modifiers
     harmony: HarmonyConfig = field(default_factory=HarmonyConfig)
     voicing: VoicingConfig = field(default_factory=VoicingConfig)
     bass: BassConfig = field(default_factory=BassConfig)
@@ -85,7 +87,8 @@ class ConductorState:
 @dataclass
 class BarResult:
     bar: int
-    events: list[NoteEvent]
+    events: list[NoteEvent]      # post-modifier (what plays; dumps show this)
+    raw_events: list[NoteEvent]  # pre-modifier IR (grid/melodic lint runs here)
     context: HarmonicContext
     params: MusicalParams
     affect: tuple[float, float, float]
@@ -317,8 +320,23 @@ class MusicEngine:
             state.last_fill = fill
             trace.append(perc_trace)
 
+        events.sort(key=lambda e: (e.start, e.pitch))  # canonical raw-IR order
+        final: list[NoteEvent] = []
+        for layer in LAYER_NAMES:
+            layer_events = [e for e in events if e.layer == layer]
+            if not layer_events:
+                continue
+            chain = cfg.chains.get(layer, ())
+            if chain:
+                layer_events = apply_chain(
+                    chain, layer_events, ctx, cfg.meter, params,
+                    self.seeder.stream("mod", layer, bar),
+                )
+            final.extend(layer_events)
+        final.sort(key=lambda e: (e.start, e.pitch))
+
         state.bar += 1
-        return BarResult(bar, events, ctx, params, self.affect.as_tuple(), tempo_points, trace)
+        return BarResult(bar, final, events, ctx, params, self.affect.as_tuple(), tempo_points, trace)
 
     def _motif(self, phrase: int, params: MusicalParams) -> Motif:
         if phrase not in self.state.motifs:

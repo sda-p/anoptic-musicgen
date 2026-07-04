@@ -21,7 +21,7 @@ from musicgen.gen.rhythm import rough_cell
 from musicgen.gen.structure import PhrasePos
 from musicgen.ir import GRID, HarmonicContext, Meter, MusicalParams, NoteEvent
 from musicgen.theory.pitch import pitch_name
-from musicgen.theory.scales import Scale
+from musicgen.theory.scales import Scale, diatonic_shift, snap_to_scale
 
 CONTOUR_SHAPES = ("arch", "descent", "ascent", "zigzag")
 
@@ -131,27 +131,14 @@ def _nearest_pc_pitch(pcs, target: int, lo: int, hi: int) -> int:
     return best if best is not None else target
 
 
-def _snap_to_scale(scale: Scale, pitch: int) -> int:
-    for delta in (0, 1, -1, 2, -2):
-        if scale.contains(pitch + delta):
-            return pitch + delta
-    return pitch
+# Metric accenting is owned by the Accent modifier (M4); the generator emits
+# musical emphasis only (cadence targets etc.) around velocity_center.
+_snap_to_scale = snap_to_scale
+_diatonic_shift = diatonic_shift
 
 
-def _diatonic_shift(scale: Scale, pitch: int, steps: int) -> int:
-    p = _snap_to_scale(scale, pitch)
-    direction = 1 if steps > 0 else -1
-    for _ in range(abs(steps)):
-        q = p + direction
-        while not scale.contains(q):
-            q += direction
-        p = q
-    return p
-
-
-def _velocity(params: MusicalParams, weight: float) -> int:
-    v = params.velocity_center + round(params.accent_depth * (weight - 2.5) / 3.0)
-    return max(1, min(127, v))
+def _velocity(params: MusicalParams, emphasis: int = 0) -> int:
+    return max(1, min(127, params.velocity_center + emphasis))
 
 
 # --- bar generation ----------------------------------------------------------
@@ -177,7 +164,6 @@ def generate_melody(
         return [], state, "melody: rest bar"
 
     mscale = ctx.chord.scale_for(ctx.scale) if ctx.chord else ctx.scale
-    weights = meter.metric_weights()
     strong = set(meter.strong_slots())
     variant, op = phrase_variant(motif, pos.pos, rng)
 
@@ -227,7 +213,7 @@ def generate_melody(
         else:
             role = "borrowed"
         events.append(NoteEvent(
-            bar_start + slot * GRID, dur_slots * GRID, pitch, _velocity(params, weights[slot]),
+            bar_start + slot * GRID, dur_slots * GRID, pitch, _velocity(params),
             "melody", degree=ctx.scale.degree_of(pitch), chord=ctx.chord_sym, role=role,
         ))
 
@@ -276,8 +262,8 @@ def _cadence_bar(
             return "chord-tone"
         return "appoggiatura" if scale.contains(p) else "borrowed"
 
-    def note(t: float, d: float, p: int, weight: float, role: str | None = None) -> NoteEvent:
-        return NoteEvent(t, d, p, _velocity(params, weight), "melody",
+    def note(t: float, d: float, p: int, emphasis: int, role: str | None = None) -> NoteEvent:
+        return NoteEvent(t, d, p, _velocity(params, emphasis), "melody",
                          degree=scale.degree_of(p), chord=ctx.chord_sym, role=role or role_of(p))
 
     # Scalar run toward the target: every hop is a diatonic step, so the
@@ -291,16 +277,16 @@ def _cadence_bar(
         run.append(p)
 
     if run:
-        events = [note(bar_start, eighth, first, 3.0)]
+        events = [note(bar_start, eighth, first, -2)]
         for i, pitch in enumerate(run):
-            events.append(note(bar_start + (i + 1) * eighth, eighth, pitch, 1.0,
+            events.append(note(bar_start + (i + 1) * eighth, eighth, pitch, -6,
                                role="passing" if role_of(pitch) == "appoggiatura" else None))
         target_start = bar_start + (len(run) + 1) * eighth
     else:
-        events = [note(bar_start, quarter, first, 3.0)]
+        events = [note(bar_start, quarter, first, -2)]
         target_start = bar_start + quarter
     events.append(note(target_start, ctx.bar * meter.bar_quarters + meter.bar_quarters - target_start,
-                       target, 4.0))
+                       target, 6))
 
     new_state = MelodyState(prev_pitch=target, prev_anchor=target)
     names = " -> ".join(pitch_name(e.pitch) for e in events)

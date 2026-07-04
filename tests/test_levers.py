@@ -20,9 +20,10 @@ def test_mapped_engine_lints_clean():
     engine = _engine()
     engine.set_affect(valence=0.2, energy=0.6, tension=0.4)
     results = _advance(engine, 32)
-    events = [e for r in results for e in r.events]
     contexts = [r.context for r in results]
-    violations = lint(events, contexts)
+    raw = [e for r in results for e in r.raw_events]
+    final = [e for r in results for e in r.events]
+    violations = lint(raw, contexts, stage="pre") + lint(final, contexts, stage="post")
     assert violations == [], "\n".join(map(str, violations))
 
 
@@ -141,7 +142,8 @@ def test_lint_clean_across_automation_curves():
     for seed in (1, 2, 3):
         engine = _engine(seed=seed)
         results = run(engine, curve, 24)
-        events = [e for r in results for e in r.events]
         contexts = [r.context for r in results]
-        violations = lint(events, contexts)
+        raw = [e for r in results for e in r.raw_events]
+        final = [e for r in results for e in r.events]
+        violations = lint(raw, contexts, stage="pre") + lint(final, contexts, stage="post")
         assert violations == [], f"seed {seed}:\n" + "\n".join(map(str, violations))
