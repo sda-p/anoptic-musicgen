@@ -78,16 +78,19 @@ def generate_bass(
             approach = note(start + bar_len - cfg.approach_beats, cfg.approach_beats, pitches[i], "approach")
             trace_bits.append(f"approach {kinds[i]} {pitches[i]} -> target {target}")
 
+    # Root/fifth split lands on a pulse (half-bar in 4/4 and 6/8, beat 2 in
+    # 3/4) so the fifth reinforces the meter instead of an offbeat.
+    split = meter.pulse_quarters * max(1, meter.pulses // 2)
     events: list[NoteEvent] = []
     if params.note_density < 0.35 or approach is None:
         events.append(note(start, bar_len, root, "root"))
-    elif params.note_density < 0.65:
+    elif params.note_density < 0.65 or bar_len - split - cfg.approach_beats <= 0:
         events.append(note(start, bar_len - cfg.approach_beats, root, "root"))
     else:
         fifth_pc = ctx.chord_pcs[2] if len(ctx.chord_pcs) >= 3 else root_pc
         fifth = _nearest_instance(fifth_pc, root, cfg.lo, cfg.hi)
-        events.append(note(start, bar_len / 2, root, "root"))
-        events.append(note(start + bar_len / 2, bar_len / 2 - cfg.approach_beats, fifth, "chord-tone"))
+        events.append(note(start, split, root, "root"))
+        events.append(note(start + split, bar_len - split - cfg.approach_beats, fifth, "chord-tone"))
         trace_bits.append(f"fifth {fifth}")
     if approach is not None:
         events.append(approach)

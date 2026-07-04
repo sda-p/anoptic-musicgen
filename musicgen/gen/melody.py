@@ -63,8 +63,9 @@ def _contour_offsets(shape: str, n: int, span: int) -> tuple[int, ...]:
     return tuple((i // 2) + (2 if i % 2 else 0) for i in range(n))  # rising zigzag
 
 
-def make_motif(rng: random.Random, density: float, roughness: float, cfg: MelodyConfig) -> Motif:
-    rhythm = rough_cell(rng, density, roughness)
+def make_motif(rng: random.Random, density: float, roughness: float, cfg: MelodyConfig,
+               slots: int = 16) -> Motif:
+    rhythm = rough_cell(rng, density, roughness, slots=slots)
     shape = rng.choice(CONTOUR_SHAPES)
     span = rng.randint(cfg.span_min, cfg.span_max)
     return Motif(rhythm, _contour_offsets(shape, len(rhythm), span), shape)
@@ -103,7 +104,7 @@ def _ornament(m: Motif, rng: random.Random) -> Motif:
     return Motif(rhythm, contour, m.shape)
 
 
-def phrase_variant(motif: Motif, pos: int, rng: random.Random) -> tuple[Motif, str]:
+def phrase_variant(motif: Motif, pos: int, rng: random.Random, slots: int = 16) -> tuple[Motif, str]:
     """Sentence-form plan: statement, sequences, developments, ornament drive."""
     if pos == 0:
         return motif, "statement"
@@ -115,7 +116,7 @@ def phrase_variant(motif: Motif, pos: int, rng: random.Random) -> tuple[Motif, s
     if pos == 6:
         return _ornament(motif, rng), "ornament"
     op = rng.choice(("invert", "displace", "truncate"))
-    varied = {"invert": _invert(motif), "displace": _displace(motif), "truncate": _truncate(motif)}[op]
+    varied = {"invert": _invert(motif), "displace": _displace(motif, slots), "truncate": _truncate(motif)}[op]
     return varied, op
 
 
@@ -165,7 +166,7 @@ def generate_melody(
 
     mscale = ctx.chord.scale_for(ctx.scale) if ctx.chord else ctx.scale
     strong = set(meter.strong_slots())
-    variant, op = phrase_variant(motif, pos.pos, rng)
+    variant, op = phrase_variant(motif, pos.pos, rng, meter.slots)
 
     anchor_target = state.prev_pitch if state.prev_pitch is not None else params.register_center
     anchor_target = min(max(anchor_target, lo + 3), hi - 3)

@@ -38,27 +38,48 @@ class Meter:
 
     @property
     def slots(self) -> int:
-        """Grid slots per bar (16 in 4/4)."""
+        """Grid slots per bar (16 in 4/4, 12 in 3/4 and 6/8)."""
         return round(self.bar_quarters / GRID)
 
     def slot_of(self, start: float) -> int:
         """Grid slot within the bar for a beat position."""
         return round((start - self.bar_of(start) * self.bar_quarters) / GRID)
 
+    @property
+    def is_compound(self) -> bool:
+        """Compound meters (6/8, 9/8, 12/8) group in threes: the felt pulse
+        is the dotted unit, not the notated denominator beat."""
+        return self.numerator >= 6 and self.numerator % 3 == 0
+
+    @property
+    def pulses(self) -> int:
+        """Felt beats per bar (4/4 -> 4, 3/4 -> 3, 6/8 -> 2, 12/8 -> 4)."""
+        return self.numerator // 3 if self.is_compound else self.numerator
+
+    @property
+    def pulse_quarters(self) -> float:
+        """Quarter-note length of one felt beat (1.0 in x/4, 1.5 in 6/8)."""
+        return self.bar_quarters / self.pulses
+
+    @property
+    def pulse_slots(self) -> int:
+        """Grid slots per felt beat (4 in x/4, 6 in 6/8)."""
+        return round(self.pulse_quarters / GRID)
+
     def metric_weights(self) -> tuple[float, ...]:
         """Accent hierarchy per grid slot (PLANS.md §5.4): downbeat 4.0,
-        mid-bar beat 3.5, other beats 3.0, 8th offbeats 2.0, 16ths 1.0."""
-        slots_per_beat = max(1, round((4.0 / self.denominator) / GRID))
-        half_beat = max(1, slots_per_beat // 2)
+        mid-bar pulse 3.5, other pulses 3.0, 8ths 2.0, 16ths 1.0. Pulses are
+        felt beats, so 6/8 accents its two dotted quarters, not six 8ths."""
+        eighth = max(1, round(0.5 / GRID))
         out = []
         for s in range(self.slots):
             if s == 0:
                 out.append(4.0)
-            elif s % slots_per_beat == 0:
-                beat = s // slots_per_beat
-                is_mid = self.numerator % 2 == 0 and beat == self.numerator // 2
+            elif s % self.pulse_slots == 0:
+                pulse = s // self.pulse_slots
+                is_mid = self.pulses % 2 == 0 and pulse == self.pulses // 2
                 out.append(3.5 if is_mid else 3.0)
-            elif s % half_beat == 0:
+            elif s % eighth == 0:
                 out.append(2.0)
             else:
                 out.append(1.0)

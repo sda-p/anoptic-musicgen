@@ -37,6 +37,8 @@ class Swing:
     amount: float = 0.5  # 0 straight .. 1 full triplet
 
     def apply(self, events, ctx, meter, params, rng) -> list[NoteEvent]:
+        if meter.is_compound:
+            return list(events)  # the feel is already ternary; nothing to swing
         out = []
         for ev in events:
             frac = ev.start % 1.0

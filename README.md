@@ -57,7 +57,7 @@ default soundfont path: `/usr/share/sounds/sf2/FluidR3_GM.sf2`).
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev,live]"   # live extra = python-rtmidi (Linux/ALSA)
-.venv/bin/python -m pytest               # 161 tests
+.venv/bin/python -m pytest               # 172 tests
 ```
 
 The generation core is stdlib-only; `mido`/`rtmidi` are confined to the MIDI
@@ -75,6 +75,7 @@ and `--no-audio`; most accept `--bars N`, and the single-render demos take
 | `demos/demo_journey.py` | **Flagship**: ~3 min scripted scenario — explore → threat → combat → victory → calm — driven purely through the levers, no hard cuts |
 | `demos/demo_live.py` | Real-time playback through FluidSynth with the levers on the keyboard (`a/z` `s/x` `d/c` nudge, `1–5` act presets, `o/l` tempo override, `m/n` modulate a fifth). `--selftest 8` verifies the audio chain hands-free |
 | `demos/demo_modulation.py` | Pivot-chord key changes: scripted requests (C → G → Eb → urgent snap home) plus the automatic wander policy — dumps annotate the pivot in both keys |
+| `demos/demo_meters.py` | The same seed and lever arc in 4/4, 3/4 (waltz), and 6/8 (compound: two dotted-quarter pulses drive drums, bass, melody, and accents) |
 | `demos/demo_axes.py` | 3×3 grid over (valence × energy) at fixed seed — hear each axis in isolation |
 | `demos/demo_tension.py` | Tension swept 0 → 1 → 0: watch cadences shift authentic → half → deceptive and extensions accumulate |
 | `demos/demo_seeds.py` | Same levers, five seeds — variety under identical control |
@@ -140,6 +141,6 @@ research.md          # background survey the design distilled from
 
 ## Status
 
-Prototype; core scope complete, including real key modulation (pivot chords)
-and the signalflow DSP backend. Deliberately out of scope for now: compound
-meters (3/4, 6/8) and energy-driven instrument swaps.
+Prototype; core scope complete, including real key modulation (pivot
+chords), triple and compound meters (3/4, 6/8, 12/8), and the signalflow DSP
+backend. Deliberately out of scope for now: energy-driven instrument swaps.

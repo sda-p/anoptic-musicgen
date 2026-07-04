@@ -1,11 +1,15 @@
 """Euclidean percussion with phrase-end fills (PLANS.md §5.4).
 
-Kick follows E(k, 16) with k scaled by density (slot 0 is always a hit —
-E(k, n) starts on 0). Snare anchors the backbeat, gaining rotated ghost hits
-as roughness rises. Hats subdivide by density. The cadence bar may replace
-its second half with a snare/tom fill (probability grows with tension), and
-a fill earns a crash on the next phrase downbeat — fills double as audible
-transition markers (iMUSE boundary principle).
+In simple meters the kick follows E(k, slots) with k scaled by density (slot
+0 is always a hit — E(k, n) starts on 0); compound meters get grouped kicks
+instead (even pulses, plus the shuffle 8th and a pickup as density rises),
+since Euclidean spreading fights the 3+3 grouping. Snare anchors odd pulses
+(the backbeat generalized: beats 2+4 in 4/4, the second dotted quarter in
+6/8), gaining ghost pickups as roughness rises. Hats subdivide by density and
+accent pulses. The cadence bar may replace its tail with a snare/tom fill
+(probability grows with tension), and a fill earns a crash on the next phrase
+downbeat — fills double as audible transition markers (iMUSE boundary
+principle).
 """
 
 from __future__ import annotations
@@ -30,8 +34,16 @@ DRUMS = {
     "shaker": 70,
 }
 
-FILL_PATTERNS = ((10, 12, 14), (8, 10, 12, 14), (10, 12, 13, 14))
+FILL_PATTERNS = ((-6, -4, -2), (-8, -6, -4, -2), (-6, -4, -3, -2))  # slots from bar end
 FILL_VOICES = ("snare", "htom", "mtom", "ltom")
+
+
+def _ghost_slots(meter: Meter) -> tuple[int, ...]:
+    if meter.is_compound:  # 8th-note pickups into each pulse
+        return tuple(p * meter.pulse_slots - 2 for p in range(1, meter.pulses + 1))
+    if meter.slots == 16:  # the classic 4/4 ghost set, kept verbatim
+        return (3, 7, 10, 15)
+    return tuple(p * meter.pulse_slots - 1 for p in range(1, meter.pulses + 1))
 
 
 @dataclass(frozen=True)
@@ -61,16 +73,27 @@ def generate_perc(
 
     hits: list[tuple[int, str, int]] = []  # (slot, drum, velocity)
 
-    kick_k = 2 + round(density * 3)
-    kick_slots = euclid(kick_k, slots)
+    if meter.is_compound:
+        ps = meter.pulse_slots
+        kicks = {p * ps for p in range(0, meter.pulses, 2)}
+        if density > 0.55:
+            kicks |= {p * ps + 4 for p in range(0, meter.pulses, 2)}  # the shuffle 8th
+        if density > 0.75:
+            kicks.add(slots - 2)  # 8th pickup into the next downbeat
+        kick_slots = tuple(sorted(kicks))
+        kick_trace = f"kick grouped {kick_slots}"
+    else:
+        kick_k = 2 + round(density * 3)
+        kick_slots = euclid(kick_k, slots)
+        kick_trace = f"kick E({kick_k},{slots})"
     hits += [(s, "kick", vel_of["kick"]) for s in kick_slots]
 
-    backbeat = [s for s in (slots // 4, 3 * slots // 4) if s < slots]
+    backbeat = [p * meter.pulse_slots for p in range(1, meter.pulses, 2)]
     hits += [(s, "snare", vel_of["snare"]) for s in backbeat]
     ghost_prob = max(0.0, roughness - 0.25) * 0.6
     hits += [
         (s, "snare", cfg.ghost_velocity)
-        for s in (3, 7, 10, 15)
+        for s in _ghost_slots(meter)
         if s < slots and rng.random() < ghost_prob
     ]
 
@@ -80,16 +103,16 @@ def generate_perc(
         if rng.random() < hat_drop:
             continue
         drum = "ohat" if s == slots - 2 and rng.random() < 0.25 else "chat"
-        accent = 6 if s % (slots // 4) == 0 else 0
+        accent = 6 if s % meter.pulse_slots == 0 else 0
         hits.append((s, drum, vel_of["chat"] + accent))
 
     fill = False
-    trace_bits = [f"kick E({kick_k},{slots})"]
+    trace_bits = [kick_trace]
     if pos.slot == "cadence":
         fill_prob = cfg.fill_base_prob + ctx.tension * cfg.fill_tension_weight
         fill = rng.random() < fill_prob
         if fill:
-            pattern = FILL_PATTERNS[rng.randrange(len(FILL_PATTERNS))]
+            pattern = tuple(slots + o for o in FILL_PATTERNS[rng.randrange(len(FILL_PATTERNS))])
             hits = [h for h in hits if h[0] < pattern[0]]
             for i, s in enumerate(pattern):
                 voice = FILL_VOICES[min(i, len(FILL_VOICES) - 1)]

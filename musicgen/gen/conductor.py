@@ -503,5 +503,6 @@ class MusicEngine:
             self.state.motifs[phrase] = make_motif(
                 self.seeder.stream("motif", phrase),
                 params.note_density, params.roughness, self.config.melody,
+                slots=self.config.meter.slots,
             )
         return self.state.motifs[phrase]
