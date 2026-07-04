@@ -34,7 +34,7 @@ class LintLimits:
     max_voice_move: int = 7
     pad_range: tuple[int, int] = (52, 79)
     bass_range: tuple[int, int] = (26, 55)
-    melody_range: tuple[int, int] = (55, 89)
+    melody_range: tuple[int, int] = (54, 90)  # register_center map range [66,78] ± 12
     melody_strong_chord_ratio: float = 0.8
     leap_resolution_ratio: float = 0.9
     leap_semitones: int = 5  # intervals beyond this are leaps needing recovery

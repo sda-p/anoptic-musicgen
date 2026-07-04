@@ -38,6 +38,9 @@ def dump_bars(
     contexts: Sequence[HarmonicContext],
     meter: Meter = Meter(),
     params: MusicalParams | None = None,
+    *,
+    params_by_bar: dict[int, MusicalParams] | None = None,
+    affect_by_bar: dict[int, tuple[float, float, float]] | None = None,
 ) -> str:
     ctx_by_bar = {c.bar: c for c in contexts}
     by_bar: dict[int, list[NoteEvent]] = {}
@@ -60,6 +63,20 @@ def dump_bars(
         if params is not None:
             head.append(f"{params.tempo_bpm:g} BPM")
         lines.append(" │ ".join(head))
+        bar_params = params_by_bar.get(bar) if params_by_bar else None
+        if bar_params is not None:
+            bits = []
+            if affect_by_bar and bar in affect_by_bar:
+                v, e, t = affect_by_bar[bar]
+                bits.append(f"val {v:+.2f} en {e:.2f} ten {t:.2f}")
+            bits.append(f"{bar_params.tempo_bpm:.1f} BPM")
+            bits.append(
+                f"dens {bar_params.note_density:.2f} rough {bar_params.roughness:.2f} "
+                f"art {bar_params.articulation:.2f} vel {bar_params.velocity_center} "
+                f"reg {bar_params.register_center}"
+            )
+            bits.append("layers " + ("+".join(bar_params.layers) or "-"))
+            lines.append("   levers │ " + " │ ".join(bits))
         for layer in LAYER_NAMES:
             layer_events = [e for e in by_bar.get(bar, []) if e.layer == layer]
             for i, ev in enumerate(layer_events):
