@@ -235,6 +235,11 @@ class MusicEngine:
             harmonic_rhythm=self._harmonic_rhythm(),
             dissonance_budget=a.tension,
             cadence_policy=self._policy(structure.phrase_position(bar, cfg.phrase_bars).phrase),
+            filter_cutoff=float(ov.get("filter_cutoff", mapping.filter_cutoff_target(a, table))),
+            reverb_send=float(ov.get("reverb_send", mapping.reverb_send_target(a, table))),
+            delay_send=float(ov.get("delay_send", mapping.delay_send_target(a, table))),
+            drive=float(ov.get("drive", mapping.drive_target(a, table))),
+            stereo_width=float(ov.get("stereo_width", mapping.stereo_width_target(a, table))),
         )
         return params, tempo_points
 

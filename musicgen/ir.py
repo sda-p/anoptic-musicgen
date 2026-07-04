@@ -135,3 +135,9 @@ class MusicalParams:
     harmonic_rhythm: float = 1.0  # chords per bar
     dissonance_budget: float = 0.0
     cadence_policy: str = "authentic"
+    # --- DSP tier (consumed by the synth backend; inert on the MIDI path) ---
+    filter_cutoff: float = 2500.0  # Hz, master brightness for subtractive voices
+    reverb_send: float = 0.20      # 0..1 global send scale
+    delay_send: float = 0.10       # 0..1 global send scale
+    drive: float = 0.15            # 0..1 master saturation amount
+    stereo_width: float = 0.70     # pad width 0..1+

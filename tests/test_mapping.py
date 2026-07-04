@@ -83,3 +83,27 @@ def test_slew_limits_step():
     assert slew(100.0, 160.0, 2.0) == 102.0
     assert slew(100.0, 60.0, 2.0) == 98.0
     assert slew(100.0, 101.0, 2.0) == 101.0
+
+
+def test_dsp_targets():
+    from musicgen.control.mapping import (
+        delay_send_target, drive_target, filter_cutoff_target,
+        reverb_send_target, stereo_width_target,
+    )
+
+    dark_calm = Affect(-0.8, 0.1, 0.1)
+    bright_hot = Affect(0.8, 0.95, 0.2)
+    tense = Affect(0.0, 0.5, 0.95)
+
+    assert filter_cutoff_target(bright_hot, T) > filter_cutoff_target(dark_calm, T) * 4
+    assert 100 < filter_cutoff_target(dark_calm, T) < 1000
+    assert filter_cutoff_target(bright_hot, T) < 12000
+
+    assert reverb_send_target(tense, T) > reverb_send_target(Affect(0, 0.5, 0.1), T)
+    assert reverb_send_target(dark_calm, T) > reverb_send_target(bright_hot, T)  # stillness widens
+    assert 0.0 <= reverb_send_target(Affect(0, 0, 1), T) <= 0.65
+
+    assert delay_send_target(Affect(0, 0.9, 0.9), T) > delay_send_target(dark_calm, T)
+    assert drive_target(bright_hot, T) > drive_target(dark_calm, T)
+    assert drive_target(Affect(0, 1, 0), T) <= 0.6
+    assert stereo_width_target(Affect(1, 0, 0), T) > stereo_width_target(Affect(-1, 0, 0), T)

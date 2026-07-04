@@ -73,6 +73,7 @@ and `--no-audio`; most accept `--bars N`, and the single-render demos take
 | `demos/m2_full.py` | Full texture at static levers (`--mode aeolian --valence -0.7` is a good time) |
 | `demos/m1_harmony.py` | Harmony backbone only: progression walk + voice-led pad + bass |
 | `demos/m0_smoke.py` | Minimal pipeline check: hardcoded I–IV–V–I through MIDI/dump/audio |
+| `demos/demo_synth.py` | The journey through the **signalflow synthesis backend** (`pip install -e ".[synth]"`): subtractive/FM voices, lever-driven filter/send/drive automation, tempo-synced delay, hand-rolled reverb, kick-triggered ducking. `--live` plays in real time. See `SYNTHESIS.md` |
 
 Example:
 
@@ -115,7 +116,11 @@ musicgen/
 ├── verify.py        # theory linter: scale/chord membership, voice leading,
 │                    #   melody rules, cadence realization — pre & post modifier
 ├── audition.py      # FluidSynth render/playback helpers
-└── live.py          # real-time player: beat clock, look-ahead scheduler, ports
+├── clock.py         # BeatClock: beats -> seconds through the tempo map
+├── live.py          # real-time MIDI player: look-ahead scheduler, ports
+└── synth/           # signalflow DSP backend: voices, console (buses/sends/
+                     #   reverb/ducking/master), offline + realtime renderers
+                     #   -> doubles as the C-audio-library spec, see SYNTHESIS.md
 demos/               # the scripts above (+ common.py emission pipeline)
 tests/               # pytest suite
 out/                 # renders (untracked)

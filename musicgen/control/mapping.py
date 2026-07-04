@@ -75,6 +75,20 @@ class MappingTable:
     harmonic_slow_energy: float = 0.30
     harmonic_slow_tension: float = 0.50
 
+    # --- DSP tier (synth backend; PLANS.md M6 / SYNTHESIS.md) ---
+    cutoff_base_hz: float = 350.0
+    cutoff_energy_octaves: float = 4.2   # 350 Hz .. ~6.4 kHz across energy
+    cutoff_valence_octaves: float = 0.5  # brightness tint
+    reverb_send_base: float = 0.10       # wetter when tense and when calm
+    reverb_send_tension: float = 0.30
+    reverb_send_stillness: float = 0.18  # scaled by (1 - energy)
+    delay_send_base: float = 0.04
+    delay_send_activity: float = 0.24    # scaled by tension * energy
+    drive_base: float = 0.05
+    drive_energy: float = 0.45           # scaled by energy^2
+    width_base: float = 0.55
+    width_valence: float = 0.25
+
 
 def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
@@ -155,3 +169,27 @@ def harmonic_rhythm_target(a: Affect, t: MappingTable) -> float:
 
 def slew(current: float, target: float, max_step: float) -> float:
     return current + _clamp(target - current, -max_step, max_step)
+
+
+# --- DSP tier -----------------------------------------------------------------
+
+def filter_cutoff_target(a: Affect, t: MappingTable) -> float:
+    octaves = t.cutoff_energy_octaves * a.energy + t.cutoff_valence_octaves * max(0.0, a.valence)
+    return t.cutoff_base_hz * 2.0 ** octaves
+
+
+def reverb_send_target(a: Affect, t: MappingTable) -> float:
+    raw = t.reverb_send_base + t.reverb_send_tension * a.tension + t.reverb_send_stillness * (1.0 - a.energy)
+    return _clamp(raw, 0.0, 0.65)
+
+
+def delay_send_target(a: Affect, t: MappingTable) -> float:
+    return _clamp(t.delay_send_base + t.delay_send_activity * a.tension * a.energy, 0.0, 0.5)
+
+
+def drive_target(a: Affect, t: MappingTable) -> float:
+    return _clamp(t.drive_base + t.drive_energy * a.energy * a.energy, 0.0, 0.6)
+
+
+def stereo_width_target(a: Affect, t: MappingTable) -> float:
+    return t.width_base + t.width_valence * (a.valence + 1.0) / 2.0

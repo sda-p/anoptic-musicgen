@@ -75,6 +75,10 @@ def dump_bars(
                 f"art {bar_params.articulation:.2f} vel {bar_params.velocity_center} "
                 f"reg {bar_params.register_center}"
             )
+            bits.append(
+                f"dsp cut {bar_params.filter_cutoff / 1000:.1f}k rev {bar_params.reverb_send:.2f} "
+                f"dly {bar_params.delay_send:.2f} drv {bar_params.drive:.2f}"
+            )
             bits.append("layers " + ("+".join(bar_params.layers) or "-"))
             lines.append("   levers │ " + " │ ".join(bits))
         for layer in LAYER_NAMES:
