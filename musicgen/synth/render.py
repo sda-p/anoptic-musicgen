@@ -141,6 +141,10 @@ class RealtimeSynthPlayer:
         with self._lock:
             self._commands.append(("clear", name))
 
+    def request_key(self, tonic, *, urgent: bool = False) -> None:
+        with self._lock:
+            self._commands.append(("key", tonic, urgent))
+
     def start(self) -> None:
         self._thread = threading.Thread(target=self.run, name="musicgen-synth", daemon=True)
         self._thread.start()
@@ -160,6 +164,8 @@ class RealtimeSynthPlayer:
                 self.engine.set_override(command[1], command[2])
             elif command[0] == "clear":
                 self.engine.clear_override(command[1])
+            elif command[0] == "key":
+                self.engine.request_key(command[1], urgent=command[2])
 
     def run(self) -> None:
         import signalflow as sf

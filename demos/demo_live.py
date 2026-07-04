@@ -8,6 +8,7 @@ Keys:
   d / c   tension  +/- 0.1        3  combat     (urgent)
   o / l   tempo override +/- 8    4  victory    (urgent)
   k       clear overrides         5  calm       (urgent)
+  m / n   modulate a fifth up / down (urgent pivot-chord key change)
   q       quit
 
 Usage: .venv/bin/python demos/demo_live.py [--seed N] [--port NAME]
@@ -28,6 +29,7 @@ import tty
 from musicgen.control.mapping import MappingTable
 from musicgen.gen.conductor import EngineConfig, MusicEngine
 from musicgen.live import LivePlayer, find_output_port, open_output, spawn_fluidsynth
+from musicgen.theory.scales import TONIC_NAMES
 
 PRESETS = {
     "1": ("explore", {"valence": 0.45, "energy": 0.28, "tension": 0.12}),
@@ -68,6 +70,7 @@ def selftest(player: LivePlayer, bars: int) -> None:
 
 def tui(player: LivePlayer, engine: MusicEngine) -> None:
     tempo_override: float | None = None
+    key_pc = engine.config.key_tonic  # TUI-side key intent; arrivals confirm in bar lines
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     tty.setcbreak(fd)
@@ -95,6 +98,10 @@ def tui(player: LivePlayer, engine: MusicEngine) -> None:
                 tempo_override = base + (8 if key == "o" else -8)
                 player.set_override("tempo_bpm", tempo_override)
                 print(f"  tempo override -> {tempo_override:.0f} BPM")
+            elif key in ("m", "n"):
+                key_pc = (key_pc + (7 if key == "m" else 5)) % 12
+                player.request_key(key_pc, urgent=True)
+                print(f"  modulating -> {TONIC_NAMES[key_pc]}")
             elif key == "k":
                 tempo_override = None
                 player.clear_override("tempo_bpm")

@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cached_property
 
-from musicgen.theory.pitch import PC_SHARP
-
 _IONIAN = (0, 2, 4, 5, 7, 9, 11)
+
+# Conventional key spellings (Eb, not D#; F# kept sharp) for Scale.name.
+# Event-level spelling stays sharps-only — see pitch.pitch_name's TODO.
+TONIC_NAMES = ("C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B")
 
 MODE_OFFSETS = {
     "ionian": 0,
@@ -80,7 +82,7 @@ class Scale:
 
     @property
     def name(self) -> str:
-        return f"{PC_SHARP[self.tonic]} {self.mode}"
+        return f"{TONIC_NAMES[self.tonic]} {self.mode}"
 
 
 def snap_to_scale(scale: Scale, pitch: int) -> int:

@@ -60,6 +60,8 @@ def dump_bars(
             if ctx.cadence_slot:
                 policy = f" ({ctx.cadence_policy})" if ctx.cadence_policy else ""
                 head.append(f"{ctx.cadence_slot}{policy}")
+            if ctx.modulation:
+                head.append(f"◆ {ctx.modulation}")
         if params is not None:
             head.append(f"{params.tempo_bpm:g} BPM")
         lines.append(" │ ".join(head))

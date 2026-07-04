@@ -105,6 +105,10 @@ class LivePlayer:
         with self._lock:
             self._commands.append(("clear", name))
 
+    def request_key(self, tonic, *, urgent: bool = False) -> None:
+        with self._lock:
+            self._commands.append(("key", tonic, urgent))
+
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
@@ -126,6 +130,8 @@ class LivePlayer:
                 self.engine.set_override(command[1], command[2])
             elif command[0] == "clear":
                 self.engine.clear_override(command[1])
+            elif command[0] == "key":
+                self.engine.request_key(command[1], urgent=command[2])
 
     def run(self) -> None:
         setup_programs(self.port)

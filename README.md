@@ -18,6 +18,7 @@ comparisons isolate exactly what a lever changed.
 ```
 game / script / keyboard        set_affect(valence, energy, tension)
         │                       set_override("tempo_bpm", 96)
+        │                       request_key("Eb")
         ▼
 mapping table   affect → tempo, mode (Lydian..Phrygian), density, roughness,
 (control/)      articulation, dynamics, register, layer gates, dissonance
@@ -40,6 +41,13 @@ density/layers change at barlines, mode and cadence policy at phrase
 boundaries (`urgent=True` demotes that to the next bar). Chords are generated
 one bar ahead so generators can see what is coming.
 
+Key changes are real modulations, not transpositions: `request_key("Eb")`
+rides the next phrase cadence through a pivot chord — a chord diatonic in
+both keys, then the new key's V7 on the pre-cadence slot, then the new tonic
+on the cadence bar — falling back to a direct V7 when the keys share no
+triad. `wander_phrases=N` walks the key ±1 fifth automatically with a spring
+back toward home.
+
 ## Setup
 
 Requires Python 3.12+ and, for audio, FluidSynth with a General MIDI
@@ -49,7 +57,7 @@ default soundfont path: `/usr/share/sounds/sf2/FluidR3_GM.sf2`).
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev,live]"   # live extra = python-rtmidi (Linux/ALSA)
-.venv/bin/python -m pytest               # 141 tests
+.venv/bin/python -m pytest               # 161 tests
 ```
 
 The generation core is stdlib-only; `mido`/`rtmidi` are confined to the MIDI
@@ -65,7 +73,8 @@ and `--no-audio`; most accept `--bars N`, and the single-render demos take
 | Script | What it shows |
 |---|---|
 | `demos/demo_journey.py` | **Flagship**: ~3 min scripted scenario — explore → threat → combat → victory → calm — driven purely through the levers, no hard cuts |
-| `demos/demo_live.py` | Real-time playback through FluidSynth with the levers on the keyboard (`a/z` `s/x` `d/c` nudge, `1–5` act presets, `o/l` tempo override). `--selftest 8` verifies the audio chain hands-free |
+| `demos/demo_live.py` | Real-time playback through FluidSynth with the levers on the keyboard (`a/z` `s/x` `d/c` nudge, `1–5` act presets, `o/l` tempo override, `m/n` modulate a fifth). `--selftest 8` verifies the audio chain hands-free |
+| `demos/demo_modulation.py` | Pivot-chord key changes: scripted requests (C → G → Eb → urgent snap home) plus the automatic wander policy — dumps annotate the pivot in both keys |
 | `demos/demo_axes.py` | 3×3 grid over (valence × energy) at fixed seed — hear each axis in isolation |
 | `demos/demo_tension.py` | Tension swept 0 → 1 → 0: watch cadences shift authentic → half → deceptive and extensions accumulate |
 | `demos/demo_seeds.py` | Same levers, five seeds — variety under identical control |
@@ -91,6 +100,7 @@ from musicgen.gen.conductor import EngineConfig, MusicEngine
 engine = MusicEngine(seed=42, config=EngineConfig(mapper=MappingTable()))
 engine.set_affect(valence=-0.5, energy=0.8, tension=0.7)  # any time, any rate
 engine.set_override("tempo_bpm", 120.0)                   # pin one parameter
+engine.request_key("Eb", urgent=True)                     # pivot-chord modulation
 
 bar = engine.advance_bar()   # BarResult: events (post-modifier), raw_events,
                              # context (key/mode/chord), params, tempo_points, trace
@@ -106,7 +116,8 @@ musicgen/
 ├── ir.py            # NoteEvent (theory-annotated), Meter, HarmonicContext, MusicalParams
 ├── rng.py           # deterministic per-(subsystem, bar) seed streams
 ├── theory/          # pitch, scales/modes (brightness axis), chords (roman numerals,
-│                    #   borrowing), functional harmony walk, voice-leading search
+│                    #   borrowing), functional harmony walk, voice-leading search,
+│                    #   pivot-chord modulation
 ├── gen/             # conductor (MusicEngine), structure/phrases, rhythm (Euclidean,
 │                    #   roughness), pad, bass, melody (motifs), arp, perc
 ├── control/         # affect levers, THE mapping table, automation curves
@@ -129,7 +140,6 @@ research.md          # background survey the design distilled from
 
 ## Status
 
-Prototype; core scope complete. Deliberately out of scope for now: real key
-modulation (pivot chords), compound meters (3/4, 6/8), energy-driven
-instrument swaps, and anything DSP — General MIDI timbre is a stand-in, the
-notes are the point.
+Prototype; core scope complete, including real key modulation (pivot chords)
+and the signalflow DSP backend. Deliberately out of scope for now: compound
+meters (3/4, 6/8) and energy-driven instrument swaps.

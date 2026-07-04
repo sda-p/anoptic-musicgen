@@ -40,7 +40,9 @@ def emit(
         meter=meter,
         markers=[
             (c.bar * meter.bar_quarters,
-             f"bar {c.bar + 1}: {c.chord_sym}" + (f" [{c.cadence_slot}]" if c.cadence_slot else ""))
+             f"bar {c.bar + 1}: {c.chord_sym}"
+             + (f" [{c.cadence_slot}]" if c.cadence_slot else "")
+             + (f" [{c.modulation}]" if c.modulation else ""))
             for c in contexts
         ],
     )

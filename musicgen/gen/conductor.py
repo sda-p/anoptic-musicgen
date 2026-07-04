@@ -6,6 +6,9 @@ layers, dynamics), per beat (tempo, slew-limited), and per phrase (mode,
 cadence policy — quantized to musical boundaries per the iMUSE principle;
 set_affect(urgent=True) demotes the phrase quantization to the next barline).
 set_override(name, value) pins any Tier-2 parameter while the rest stay live.
+request_key(tonic) queues a pivot-chord modulation that rides the next phrase
+cadence (urgent=True: the earliest ungenerated bar); wander_phrases enables
+an automatic ±1-fifth key walk with a spring back toward home.
 
 With mapper=None the engine runs the M1/M2 static path: params verbatim from
 EngineConfig, fixed mode, cadence policies cycling from config.
@@ -34,10 +37,34 @@ from musicgen.modifiers import apply_chain, default_chains
 from musicgen.rng import Seeder
 from musicgen.theory.chords import Chord
 from musicgen.theory.harmony import HarmonyConfig, next_chord
+from musicgen.theory.modulation import Pivot, fifths_between, find_pivots
+from musicgen.theory.pitch import name_to_midi
 from musicgen.theory.scales import Scale
 from musicgen.theory.voicing import VoicingConfig
 
 DEFAULT_CADENCE_CYCLE = ("authentic", "half", "deceptive", "authentic")
+
+
+@dataclass(frozen=True)
+class ModulationPlan:
+    """A committed key change: the pivot bar sounds the common chord (still
+    analyzed in the old key), the dominant bar sounds V7 of the new key (the
+    context scale flips here), and the arrival bar lands the new tonic.
+    Aligned plans (cadence_phrase set) ride a phrase cadence, so pre-cadence/
+    cadence slots see degrees 5 and 1 as usual; urgent plans ignore phrase
+    structure and instead disarm any cadence slot they overlap."""
+
+    target_tonic: int
+    mode: str  # mode the pivot was analyzed in (held for the window)
+    pivot_bar: int
+    dominant_bar: int
+    arrival_bar: int
+    pivot: Pivot | None  # None: direct modulation (keys share no usable triad)
+    cadence_phrase: int | None  # phrase whose cadence this plan realizes
+
+    @property
+    def bars(self) -> tuple[int, int, int]:
+        return (self.pivot_bar, self.dominant_bar, self.arrival_bar)
 
 
 @dataclass
@@ -50,6 +77,7 @@ class EngineConfig:
     energy: float = 0.5
     tension: float = 0.45
     phrase_bars: int = 8
+    wander_phrases: int | None = None  # auto-modulate ±1 fifth every N phrases (None: never)
     cadence_policies: tuple[str, ...] | None = None  # None: tension-driven (mapper) / default cycle (static)
     mapper: MappingTable | None = None
     chains: dict[str, tuple] = field(default_factory=default_chains)  # {} disables modifiers
@@ -74,6 +102,11 @@ class ConductorState:
     melody: MelodyState = field(default_factory=MelodyState)
     motifs: dict[int, Motif] = field(default_factory=dict)
     last_fill: bool = False
+    # key state (home lives in EngineConfig.key_tonic)
+    key_tonic: int = 0
+    pending_key: tuple[int, bool] | None = None  # (target pc, urgent)
+    modulation: ModulationPlan | None = None
+    last_key_phrase: int = 0  # phrase of the last arrival (wander spacing)
     # mapper state (slew targets, hysteresis, phrase-quantized picks)
     current_mode: str = "ionian"
     current_tempo: float = 0.0
@@ -101,7 +134,7 @@ class MusicEngine:
         self.config = config or EngineConfig()
         cfg = self.config
         self.seeder = Seeder(seed)
-        self.state = ConductorState()
+        self.state = ConductorState(key_tonic=cfg.key_tonic)
         self.affect = Affect(cfg.valence, cfg.energy, cfg.tension).clamped()
         self.overrides: dict[str, object] = {}
         self._urgent = False
@@ -139,9 +172,24 @@ class MusicEngine:
     def clear_override(self, name: str) -> None:
         self.overrides.pop(name, None)
 
+    def request_key(self, tonic: int | str, *, urgent: bool = False) -> None:
+        """Queue a pivot-chord modulation to a new tonic (pc 0..11 or a note
+        name like "Eb"). The change rides the next available phrase cadence:
+        a chord diatonic in both keys two bars before the phrase end, V7 of
+        the new key on the pre-cadence slot, the new tonic on the cadence
+        bar. urgent=True instead starts at the earliest ungenerated bar,
+        ignoring phrase alignment. A later request replaces a pending one;
+        requesting the current tonic is a no-op. The home key
+        (EngineConfig.key_tonic) is what the wander policy springs back to."""
+        pc = name_to_midi(f"{tonic}4") % 12 if isinstance(tonic, str) else int(tonic) % 12
+        self.state.pending_key = (pc, urgent)
+
     # --- internals -----------------------------------------------------------
 
     def _policy(self, phrase: int) -> str:
+        plan = self.state.modulation
+        if plan is not None and phrase == plan.cadence_phrase:
+            return "authentic"  # the modulation IS this phrase's cadence
         if "cadence_policy" in self.overrides:
             return str(self.overrides["cadence_policy"])
         if self.config.cadence_policies is not None:
@@ -164,6 +212,22 @@ class MusicEngine:
     def _gen_chord(self, bar: int) -> tuple[int, Chord, str]:
         cfg = self.config
         pos = structure.phrase_position(bar, cfg.phrase_bars)
+
+        state = self.state
+        if state.modulation is None and state.pending_key is not None:
+            target, urgent = state.pending_key
+            if target == state.key_tonic:
+                state.pending_key = None
+            elif bar >= 1 and (urgent or pos.pos == pos.bars - 3):
+                state.pending_key = None
+                state.modulation = self._plan_modulation(bar, target, aligned=not urgent)
+        plan = state.modulation
+        if plan is not None and bar in plan.bars:
+            chord, why = self._modulation_chord(bar, plan, pos)
+            if chord is not None:  # None: direct plan, pivot bar walks normally
+                state.prev_chord = chord
+                return bar, chord, why
+
         held = (
             self._harmonic_rhythm() == 0.5
             and pos.slot == "free"
@@ -186,6 +250,75 @@ class MusicEngine:
         )
         self.state.prev_chord = chord
         return bar, chord, why
+
+    def _plan_modulation(self, pivot_bar: int, target: int, *, aligned: bool) -> ModulationPlan:
+        """Commit a 3-bar modulation window starting at pivot_bar. The pivot
+        is analyzed in the mode current NOW; the mode is held for the window
+        (see advance_bar) so the analysis stays true when the bars sound."""
+        mode = self.state.current_mode
+        pivots = find_pivots(Scale(self.state.key_tonic, mode), Scale(target, mode))
+        arrival = pivot_bar + 2
+        return ModulationPlan(
+            target_tonic=target,
+            mode=mode,
+            pivot_bar=pivot_bar,
+            dominant_bar=pivot_bar + 1,
+            arrival_bar=arrival,
+            pivot=pivots[0] if pivots else None,
+            cadence_phrase=(structure.phrase_position(arrival, self.config.phrase_bars).phrase
+                            if aligned else None),
+        )
+
+    def _modulation_chord(self, bar: int, plan: ModulationPlan, pos) -> tuple[Chord | None, str]:
+        new_scale = Scale(plan.target_tonic, plan.mode)
+        if bar == plan.pivot_bar:
+            if plan.pivot is None:
+                return None, ""
+            chord = Chord(plan.pivot.old_degree)  # plain triad: common to both keys by construction
+            old_scale = Scale(self.state.key_tonic, plan.mode)
+            return chord, (
+                f"modulation pivot: {chord.symbol(old_scale)} of {old_scale.name}"
+                f" = {Chord(plan.pivot.new_degree).symbol(new_scale)} of {new_scale.name}"
+            )
+        if bar == plan.dominant_bar:
+            tension = structure.effective_tension(self.affect.tension, pos)
+            chord = Chord(5, extensions=("7", "9") if tension >= 0.75 else ("7",))
+            how = "via pivot" if plan.pivot is not None else "direct, no common chord"
+            return chord, f"modulation dominant ({how}): {chord.symbol(new_scale)} of {new_scale.name}"
+        return Chord(1), f"modulation arrival: {new_scale.name}"
+
+    def _modulation_note(self, bar: int, plan: ModulationPlan) -> str:
+        """Short key-change annotation for the context/dump/MIDI markers
+        (ASCII only: SMF meta text is latin-1)."""
+        new_scale = Scale(plan.target_tonic, plan.mode)
+        if bar == plan.pivot_bar:
+            if plan.pivot is None:
+                return ""
+            return f"pivot = {Chord(plan.pivot.new_degree).symbol(new_scale)} of {new_scale.name}"
+        if bar == plan.dominant_bar:
+            return f"-> {new_scale.name}" + ("" if plan.pivot is not None else " (direct)")
+        return f"arrival: {new_scale.name}"
+
+    def _tonic_for_bar(self, bar: int) -> int:
+        """The tonic in force at a bar: flips at the planned dominant bar
+        (everything from the new key's V7 onward is analyzed in the new key)."""
+        plan = self.state.modulation
+        if plan is not None and bar >= plan.dominant_bar:
+            return plan.target_tonic
+        return self.state.key_tonic
+
+    def _wander_target(self, phrase: int) -> int:
+        """±1 fifth per move, leaning sharpwards when bright and flatwards
+        when dark, with a spring pulling back toward home beyond ±2 fifths."""
+        state, cfg = self.state, self.config
+        dist = fifths_between(cfg.key_tonic, state.key_tonic)
+        if abs(dist) >= 2:
+            step = -1 if dist > 0 else 1
+        else:
+            v = self.affect.valence
+            lean = 0.35 if v > 0.15 else -0.35 if v < -0.15 else 0.0
+            step = 1 if self.seeder.stream("wander", phrase).random() < 0.5 + lean else -1
+        return (state.key_tonic + 7 * step) % 12
 
     def _mapped_params(self, bar: int) -> tuple[MusicalParams, list[tuple[float, float]]]:
         cfg, state, a, ov = self.config, self.state, self.affect, self.overrides
@@ -248,12 +381,19 @@ class MusicEngine:
         bar = state.bar
         pos = structure.phrase_position(bar, cfg.phrase_bars)
 
-        if cfg.mapper is not None and (pos.pos == 0 or self._urgent):
+        if (cfg.wander_phrases is not None and pos.pos == 0 and bar > 0
+                and state.pending_key is None and state.modulation is None
+                and pos.phrase - state.last_key_phrase >= cfg.wander_phrases):
+            state.pending_key = (self._wander_target(pos.phrase), False)
+
+        # The mode holds while a modulation window is active so the pivot
+        # analysis stays true; a deferred urgent flag fires after arrival.
+        if cfg.mapper is not None and (pos.pos == 0 or self._urgent) and state.modulation is None:
             pinned = self.overrides.get("mode", cfg.mode)
             state.current_mode = str(pinned) if pinned else mapping.pick_mode(
                 state.current_mode, self.affect.valence, cfg.mapper)
             self._urgent = False
-        self.scale = Scale(cfg.key_tonic, state.current_mode)
+        self.scale = Scale(self._tonic_for_bar(bar), state.current_mode)
 
         if cfg.mapper is not None:
             params, tempo_points = self._mapped_params(bar)
@@ -267,8 +407,17 @@ class MusicEngine:
         queued_bar, chord, chord_trace = state.chord_queue.pop(0)
         assert queued_bar == bar, f"chord queue out of sync: {queued_bar} != {bar}"
         upcoming = state.chord_queue[0][1]
+        # Chords are symbolic (degrees); the look-ahead must realize the
+        # upcoming one against the scale ITS bar will use, not this bar's.
+        next_scale = Scale(self._tonic_for_bar(bar + 1), state.current_mode)
 
         slot = pos.slot if pos.slot in ("pre-cadence", "cadence") else ""
+        plan = state.modulation
+        mod_note = ""
+        if plan is not None and bar in plan.bars:
+            mod_note = self._modulation_note(bar, plan)
+            if plan.cadence_phrase is None:
+                slot = ""  # an urgent window supersedes any cadence slot it overlaps
         ctx = HarmonicContext(
             bar=bar,
             scale=self.scale,
@@ -276,14 +425,15 @@ class MusicEngine:
             chord_sym=chord.symbol(self.scale),
             chord_pcs=chord.voiced_pcs(self.scale),
             next_chord=upcoming,
-            next_chord_sym=upcoming.symbol(self.scale),
+            next_chord_sym=upcoming.symbol(next_scale),
             tension=structure.effective_tension(self.affect.tension, pos),
             cadence_slot=slot,
             cadence_policy=self._policy(pos.phrase) if slot else "",
+            modulation=mod_note,
         )
 
         events: list[NoteEvent] = []
-        trace = [f"bar {bar + 1} [{pos.slot}] {ctx.chord_sym} ({state.current_mode}): {chord_trace}"]
+        trace = [f"bar {bar + 1} [{pos.slot}] {ctx.chord_sym} ({self.scale.name}): {chord_trace}"]
         layers = params.layers
         if "pad" in layers:
             pad_events, voicing, pad_trace = generate_pad(ctx, cfg.meter, params, state.prev_voicing, cfg.voicing)
@@ -293,7 +443,7 @@ class MusicEngine:
         if "bass" in layers:
             bass_events, root, bass_trace = generate_bass(
                 ctx, cfg.meter, params, state.prev_bass_root,
-                next_bass_pc=upcoming.bass_pc(self.scale),
+                next_bass_pc=upcoming.bass_pc(next_scale),
                 cfg=cfg.bass,
                 rng=self.seeder.stream("bass", bar),
             )
@@ -339,6 +489,11 @@ class MusicEngine:
                 )
             final.extend(layer_events)
         final.sort(key=lambda e: (e.start, e.pitch))
+
+        if plan is not None and bar == plan.arrival_bar:
+            state.key_tonic = plan.target_tonic
+            state.modulation = None
+            state.last_key_phrase = pos.phrase
 
         state.bar += 1
         return BarResult(bar, final, events, ctx, params, self.affect.as_tuple(), tempo_points, trace)

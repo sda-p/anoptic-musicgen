@@ -114,6 +114,7 @@ class HarmonicContext:
     tension: float = 0.0
     cadence_slot: str = ""    # "" | "pre-cadence" | "cadence"
     cadence_policy: str = ""  # "" | "authentic" | "half" | "deceptive"
+    modulation: str = ""      # key-change annotation ("pivot ≡ ii of G ionian", ...)
 
 
 @dataclass
