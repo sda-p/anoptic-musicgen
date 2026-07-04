@@ -55,7 +55,8 @@ def dump_bars(
                 head.append(f"{ctx.chord_sym}{arrow}")
             head.append(f"tension {ctx.tension:.2f}")
             if ctx.cadence_slot:
-                head.append(f"cadence: {ctx.cadence_slot}")
+                policy = f" ({ctx.cadence_policy})" if ctx.cadence_policy else ""
+                head.append(f"{ctx.cadence_slot}{policy}")
         if params is not None:
             head.append(f"{params.tempo_bpm:g} BPM")
         lines.append(" │ ".join(head))

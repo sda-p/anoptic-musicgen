@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from musicgen.theory.chords import Chord
 from musicgen.theory.scales import Scale
 
 GRID = 0.25  # 16th-note grid, in quarter-note beats
@@ -65,15 +66,22 @@ class NoteEvent:
 
 @dataclass
 class HarmonicContext:
-    """Per-bar harmonic state handed from the conductor to generators."""
+    """Per-bar harmonic state handed from the conductor to generators.
+
+    chord_pcs is bass-first: chord_pcs[0] is the sounding bass pitch class
+    (respecting inversion); the linter's bass-root rule relies on this.
+    """
 
     bar: int  # 0-based
     scale: Scale
+    chord: Chord | None = None
     chord_sym: str = ""
     chord_pcs: tuple[int, ...] = ()
+    next_chord: Chord | None = None
     next_chord_sym: str = ""
     tension: float = 0.0
-    cadence_slot: str = ""  # "" | "authentic" | "half" | "deceptive"
+    cadence_slot: str = ""    # "" | "pre-cadence" | "cadence"
+    cadence_policy: str = ""  # "" | "authentic" | "half" | "deceptive"
 
 
 @dataclass
