@@ -12,21 +12,36 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
+import re
 import tempfile
 from collections import deque
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import Body, FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from musicgen.playground import telemetry
 from musicgen.playground.state import PlaygroundState
 
 METER_HZ = 30.0
-_SAMPLE_DIR = Path(tempfile.gettempdir()) / "musicgen_playground_samples"
+_TMP = Path(tempfile.gettempdir())
+_SAMPLE_DIR = _TMP / "musicgen_playground_samples"
+_PRESET_DIR = _TMP / "musicgen_playground_presets"
+_EXPORT_DIR = _TMP / "musicgen_playground_exports"
 # control messages that mutate server-mirrored state -> re-sync every client
 _SNAPSHOT_AFTER = {"set_override", "clear_override", "set_mapping", "reset_mapping",
-                   "mapping_store", "mapping_recall", "set_console", "transport", "reseed"}
+                   "mapping_store", "mapping_recall", "set_console", "transport", "reseed",
+                   "set_automation", "seek"}
+
+
+def _safe_name(name: str) -> str:
+    """A filesystem-safe preset stem: no separators, bounded length."""
+    return re.sub(r"[^A-Za-z0-9 _-]", "", str(name)).strip()[:64]
+
+
+def _preset_names() -> list[str]:
+    return sorted(p.stem for p in _PRESET_DIR.glob("*.json")) if _PRESET_DIR.is_dir() else []
 
 
 class Hub:
@@ -147,6 +162,61 @@ async def api_sample_clear() -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+@app.get("/api/presets")
+async def api_presets() -> JSONResponse:
+    return JSONResponse({"presets": _preset_names()})
+
+
+@app.post("/api/preset")
+async def api_preset_save(payload: dict = Body(...)) -> JSONResponse:
+    """Save the full session (seed, affect, overrides, mapping, console,
+    automation) under a name — the session snapshot."""
+    name = _safe_name(payload.get("name", ""))
+    if not name:
+        return JSONResponse({"ok": False, "error": "empty preset name"}, status_code=400)
+    _PRESET_DIR.mkdir(parents=True, exist_ok=True)
+    (_PRESET_DIR / f"{name}.json").write_text(json.dumps(hub.state.export_session(), indent=2))
+    return JSONResponse({"ok": True, "name": name, "presets": _preset_names()})
+
+
+@app.post("/api/preset/load")
+async def api_preset_load(payload: dict = Body(...)) -> JSONResponse:
+    name = _safe_name(payload.get("name", ""))
+    path = _PRESET_DIR / f"{name}.json"
+    if not path.is_file():
+        return JSONResponse({"ok": False, "error": f"no preset {name!r}"}, status_code=404)
+    hub.state.import_session(json.loads(path.read_text()))
+    await hub.broadcast(hub.state.snapshot())
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/preset/delete")
+async def api_preset_delete(payload: dict = Body(...)) -> JSONResponse:
+    name = _safe_name(payload.get("name", ""))
+    (_PRESET_DIR / f"{name}.json").unlink(missing_ok=True)
+    return JSONResponse({"ok": True, "presets": _preset_names()})
+
+
+@app.get("/api/export")
+async def api_export(kind: str = "wav", bars: int = 32):
+    """Offline bounce of the current config to WAV or MIDI (download). Requires
+    a stopped transport — the live player already owns the one audio graph."""
+    if hub.state.running:
+        return JSONResponse({"ok": False, "error": "stop playback before exporting"},
+                            status_code=409)
+    kind = "midi" if kind == "midi" else "wav"
+    bars = max(1, min(int(bars), 512))
+    _EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    ext = "mid" if kind == "midi" else "wav"
+    dest = _EXPORT_DIR / f"musicgen-seed{hub.state.seed}-{bars}bars.{ext}"
+    try:
+        await asyncio.to_thread(hub.state.render_export, kind, bars, str(dest))
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    media = "audio/midi" if kind == "midi" else "audio/wav"
+    return FileResponse(str(dest), media_type=media, filename=dest.name)
+
+
 @app.get("/healthz")
 async def healthz() -> dict:
     return {"ok": True, "running": hub.state.running}
@@ -178,6 +248,10 @@ def _handle(msg: dict) -> None:
         state.set_console_fields(msg["fields"])
     elif kind == "reseed":
         state.reseed(msg["seed"])
+    elif kind == "set_automation":
+        state.set_automation(msg.get("enabled"), msg.get("loop_bars"), msg.get("points"))
+    elif kind == "seek":
+        state.seek(msg["bar"])
     elif kind == "transport":
         action = msg.get("action")
         if action == "start":

@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import fields, replace
 from pathlib import Path
 
+from musicgen.control.automation import affect_at
 from musicgen.control.levers import validate_override
 from musicgen.control.mapping import MappingTable
 from musicgen.gen.conductor import EngineConfig, MusicEngine
@@ -24,6 +25,13 @@ _PRIME_SECONDS = 0.2
 
 _AFFECT_RANGE = {"valence": (-1.0, 1.0), "energy": (0.0, 1.0), "tension": (0.0, 1.0)}
 _INT_OVERRIDES = {"velocity_center", "accent_depth", "register_center"}
+
+# a gentle starter arc so the automation timeline opens with something to grab
+# (disabled by default — the XY-pad drives affect until you enable it)
+_DEFAULT_AUTOMATION = [
+    {"bar": 0, "valence": 0.2, "energy": 0.25, "tension": 0.2},
+    {"bar": 16, "valence": 0.5, "energy": 0.85, "tension": 0.7},
+]
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -67,6 +75,9 @@ class PlaygroundState:
         self.slots: dict[str, MappingTable] = {}  # A/B mapping snapshots
         self._console_config = None  # ConsoleConfig; lazy (pulls signalflow)
         self._sample = {"name": "", "root": 72}  # loaded sampler file (name for display)
+        self._start_bar = 0  # jump-to-bar: where the next start() begins
+        self.automation = {"enabled": False, "loop_bars": 0,
+                           "points": [dict(p) for p in _DEFAULT_AUTOMATION]}
         self.player = None
 
     # ------------------------------------------------------------- lifecycle
@@ -97,7 +108,8 @@ class PlaygroundState:
         player = RealtimeSynthPlayer(
             self._build_engine(), on_bar=on_bar,
             lead_seconds=_LEAD_SECONDS, prime_seconds=_PRIME_SECONDS,
-            config=self._cc(),
+            config=self._cc(), start_bar=self._start_bar,
+            automation=self._player_automation(),
         )
         player.start()
         self.player = player
@@ -106,6 +118,16 @@ class PlaygroundState:
         player, self.player = self.player, None
         if player is not None:
             player.stop()
+
+    def _restart(self, on_bar=None) -> None:
+        """Rebuild the running player from the current mirror (used by seek and
+        preset load, which change engine-construction inputs like seed/start_bar
+        that can't be hot-applied). No-op when stopped."""
+        if self.player is None:
+            return
+        cb = on_bar or self.player.on_bar
+        self.stop()
+        self.start(cb)
 
     @property
     def running(self) -> bool:
@@ -203,6 +225,123 @@ class PlaygroundState:
     def reseed(self, seed) -> None:
         self.seed = int(seed)  # takes effect on the next start()
 
+    # ---------------------------------------------------------- automation
+    def _automation_curve(self):
+        """Mirror -> the (bar, {v,e,t}) breakpoint form control.automation wants."""
+        pts = sorted(self.automation["points"], key=lambda p: int(p["bar"]))
+        return [(int(p["bar"]), {"valence": float(p["valence"]),
+                                 "energy": float(p["energy"]),
+                                 "tension": float(p["tension"])}) for p in pts]
+
+    def _player_automation(self):
+        if not (self.automation["enabled"] and self.automation["points"]):
+            return None
+        return (self._automation_curve(), int(self.automation["loop_bars"]))
+
+    def set_automation(self, enabled=None, loop_bars=None, points=None) -> None:
+        if enabled is not None:
+            self.automation["enabled"] = bool(enabled)
+        if loop_bars is not None:
+            self.automation["loop_bars"] = max(0, int(loop_bars))
+        if points is not None:
+            self.automation["points"] = [{
+                "bar": max(0, int(p["bar"])),
+                "valence": _clamp(float(p["valence"]), *_AFFECT_RANGE["valence"]),
+                "energy": _clamp(float(p["energy"]), *_AFFECT_RANGE["energy"]),
+                "tension": _clamp(float(p["tension"]), *_AFFECT_RANGE["tension"]),
+            } for p in points]
+        if self.player is not None:
+            auto = self._player_automation()
+            self.player.set_automation(auto[0] if auto else None,
+                                       int(self.automation["loop_bars"]))
+
+    def seek(self, bar) -> None:
+        """Jump-to-bar: play resumes from this (deterministic) bar. Restarts a
+        running player, which warms the engine there with no audio."""
+        self._start_bar = max(0, int(bar))
+        self._restart()
+
+    # ------------------------------------------------------- sessions / export
+    def _mapper_from_dict(self, data: dict) -> MappingTable:
+        base = MappingTable()
+        updates = {f.name: _match_type(getattr(base, f.name), data[f.name])
+                   for f in fields(MappingTable) if f.name in data}
+        return replace(base, **updates)
+
+    def export_session(self) -> dict:
+        """The full session as a JSON-able preset: seed, start bar, affect,
+        pinned overrides, the whole MappingTable, console numerics, and the
+        automation track. (The uploaded sample file is transient — not stored.)"""
+        return {
+            "seed": self.seed,
+            "start_bar": self._start_bar,
+            "affect": dict(self.affect),
+            "pinned": {k: to_jsonable(v) for k, v in self.pinned.items()},
+            "mapping": {f.name: to_jsonable(getattr(self.mapper, f.name))
+                        for f in fields(MappingTable)},
+            "console": self._console_values(),
+            "automation": {"enabled": self.automation["enabled"],
+                           "loop_bars": self.automation["loop_bars"],
+                           "points": [dict(p) for p in self.automation["points"]]},
+        }
+
+    def import_session(self, data: dict) -> None:
+        self.seed = int(data.get("seed", self.seed))
+        self._start_bar = max(0, int(data.get("start_bar", 0)))
+        if "affect" in data:
+            self.affect = {k: _clamp(float(data["affect"].get(k, self.affect[k])),
+                                     *_AFFECT_RANGE[k]) for k in self.affect}
+        if "pinned" in data:
+            pinned: dict[str, object] = {}
+            for name, value in data["pinned"].items():
+                try:
+                    validate_override(name)
+                    pinned[name] = _coerce_override(name, value)
+                except Exception:  # noqa: BLE001
+                    pass  # a stale override name from an old preset — skip it
+            self.pinned = pinned
+        if "mapping" in data:
+            self.mapper = self._mapper_from_dict(data["mapping"])
+        if "console" in data:
+            known = {f.name for f in fields(type(self._cc()))}
+            nums = {k: float(v) for k, v in data["console"].items() if k in known}
+            self._console_config = replace(self._cc(), **nums)  # keeps sample_path
+        if "automation" in data:
+            self.set_automation(data["automation"].get("enabled"),
+                                data["automation"].get("loop_bars"),
+                                data["automation"].get("points"))
+        self._restart()  # rebuild a running player with the imported config
+
+    def render_export(self, kind: str, bars: int, path) -> "Path":
+        """Offline bounce of the current config from bar 0 — a fresh engine
+        (deterministic), driven by the automation curve if enabled: WAV via the
+        synth console, or a standard-MIDI file. Caller must ensure the live
+        player is stopped (one signalflow graph at a time)."""
+        from pathlib import Path as _Path
+
+        engine = self._build_engine()
+        auto = self._player_automation()
+        results = []
+        for _ in range(max(1, int(bars))):
+            if auto is not None:
+                curve, loop = auto
+                b = engine.state.bar
+                engine.set_affect(**affect_at(curve, b % loop if loop > 0 else b))
+            results.append(engine.advance_bar())
+        meter = engine.config.meter
+        if kind == "midi":
+            from musicgen.midi_io import write_midi
+            events = [ev for r in results for ev in r.events]
+            tempo_map = sorted({(round(float(b), 6), float(bpm))
+                                for r in results for b, bpm in r.tempo_points})
+            if not tempo_map:
+                tempo_map = [(0.0, float(results[0].params.tempo_bpm))]
+            write_midi(path, events, tempo_map=tempo_map, meter=meter)
+        else:
+            from musicgen.synth.render import render_offline
+            render_offline(results, meter, path, config=self._cc())
+        return _Path(path)
+
     # ------------------------------------------------------------- readback
     def snapshot(self) -> dict:
         return {
@@ -216,4 +355,8 @@ class PlaygroundState:
             "slots": sorted(self.slots),
             "console": self._console_values(),
             "sample": dict(self._sample),
+            "start_bar": self._start_bar,
+            "automation": {"enabled": self.automation["enabled"],
+                           "loop_bars": self.automation["loop_bars"],
+                           "points": [dict(p) for p in self.automation["points"]]},
         }

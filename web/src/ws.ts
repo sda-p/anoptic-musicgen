@@ -1,5 +1,5 @@
 import { mainStore, meterStore } from "./store";
-import type { Affect, ServerMessage } from "./protocol";
+import type { Affect, AutomationPoint, AutomationTrack, ServerMessage } from "./protocol";
 
 // One WebSocket to the FastAPI service; auto-reconnects. Served from the same
 // origin whether the page comes from FastAPI (prod) or the Vite dev proxy.
@@ -52,6 +52,8 @@ function handle(msg: ServerMessage): void {
         slots: msg.slots,
         console: msg.console,
         sample: msg.sample,
+        startBar: msg.start_bar,
+        automation: msg.automation,
       });
       break;
     case "bar": {
@@ -115,4 +117,66 @@ export const api = {
   recallMapping: (slot: string) => send({ type: "mapping_recall", slot }),
   // structural console change: rebuilds the audio graph (a brief gap)
   setConsole: (fields: Record<string, unknown>) => send({ type: "set_console", fields }),
+  // drawable affect automation (optimistic; the server echoes a snapshot)
+  setAutomation: (patch: Partial<AutomationTrack>) => {
+    mainStore.set({ automation: { ...mainStore.get().automation, ...patch } });
+    send({ type: "set_automation", ...patch });
+  },
+  // jump-to-bar: restarts the running engine warmed to this deterministic bar
+  seek: (bar: number) => send({ type: "seek", bar }),
 };
+
+// Presets + export ride REST (file I/O), not the WebSocket. Each returns the
+// refreshed preset list where relevant so the sessions tab can re-render.
+export async function listPresets(): Promise<string[]> {
+  const r = await fetch("/api/presets");
+  return (await r.json()).presets ?? [];
+}
+
+export async function savePreset(name: string): Promise<string[]> {
+  const r = await fetch("/api/preset", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  const j = await r.json();
+  if (!j.ok) throw new Error(j.error ?? "save failed");
+  return j.presets ?? [];
+}
+
+export async function loadPreset(name: string): Promise<void> {
+  const r = await fetch("/api/preset/load", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!r.ok) throw new Error((await r.json()).error ?? "load failed");
+}
+
+export async function deletePreset(name: string): Promise<string[]> {
+  const r = await fetch("/api/preset/delete", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  return (await r.json()).presets ?? [];
+}
+
+// Fetch the export as a blob so a 409 (playing) / 500 surfaces as a message
+// instead of downloading an error body; on success, trigger a browser download.
+export async function exportFile(kind: "wav" | "midi", bars: number): Promise<void> {
+  const r = await fetch(`/api/export?kind=${kind}&bars=${bars}`);
+  if (!r.ok) {
+    let msg = `export failed (${r.status})`;
+    try { msg = (await r.json()).error ?? msg; } catch { /* non-JSON body */ }
+    throw new Error(msg);
+  }
+  const blob = await r.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `musicgen-${bars}bars.${kind === "midi" ? "mid" : "wav"}`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export type { AutomationPoint };

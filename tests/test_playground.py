@@ -134,6 +134,70 @@ def test_inspection_telemetry():
     json.dumps(msg)
 
 
+def test_automation_track_mirror_and_curve():
+    from musicgen.control.automation import affect_at
+
+    st = PlaygroundState()
+    snap = st.snapshot()
+    assert snap["start_bar"] == 0
+    assert snap["automation"]["enabled"] is False and len(snap["automation"]["points"]) == 2
+
+    st.set_automation(enabled=True, loop_bars=32,
+                      points=[{"bar": 0, "valence": -0.5, "energy": 0.1, "tension": 0.0},
+                              {"bar": 8, "valence": 0.9, "energy": 1.0, "tension": 1.0}])
+    a = st.snapshot()["automation"]
+    assert a["enabled"] and a["loop_bars"] == 32
+    mid = affect_at(st._automation_curve(), 4)                 # linear midpoint
+    assert mid["valence"] == pytest.approx(0.2) and mid["energy"] == pytest.approx(0.55)
+    # out-of-range points are clamped into the affect ranges (and bar >= 0)
+    st.set_automation(points=[{"bar": -3, "valence": 5, "energy": -1, "tension": 2}])
+    assert st.snapshot()["automation"]["points"][0] == {
+        "bar": 0, "valence": 1.0, "energy": 0.0, "tension": 1.0}
+
+
+def test_seek_sets_start_bar():
+    st = PlaygroundState()
+    st.seek(12)                                                # stopped: just records it
+    assert st.snapshot()["start_bar"] == 12
+    st.seek(-4)
+    assert st.snapshot()["start_bar"] == 0                     # clamped non-negative
+
+
+def test_session_export_import_roundtrip():
+    st = PlaygroundState()
+    st.reseed(7)
+    st.set_override("tempo_bpm", 132)
+    st.set_mapping_field("tempo_base", 88.0)
+    st.seek(12)
+    st.set_automation(enabled=True, loop_bars=16,
+                      points=[{"bar": 0, "valence": 0.0, "energy": 0.0, "tension": 0.0}])
+    sess = st.export_session()
+    json.dumps(sess)  # a preset is a plain JSON document
+
+    other = PlaygroundState()
+    other.import_session(sess)
+    s = other.snapshot()
+    assert s["seed"] == 7 and s["pinned"]["tempo_bpm"] == 132.0
+    assert s["mapping"]["tempo_base"] == 88.0 and other.mapper.tempo_base == 88.0
+    assert s["start_bar"] == 12
+    assert s["automation"]["enabled"] is True and s["automation"]["loop_bars"] == 16
+    # a stale override name in an old preset is skipped, not fatal
+    sess["pinned"] = {"gone_param": 1, "drive": 0.4}
+    fresh = PlaygroundState()
+    fresh.import_session(sess)
+    assert "gone_param" not in fresh.pinned and fresh.pinned["drive"] == 0.4
+
+
+def test_midi_export_is_deterministic(tmp_path):
+    from musicgen.midi_io import read_notes
+
+    a, b = tmp_path / "a.mid", tmp_path / "b.mid"
+    PlaygroundState().render_export("midi", 8, str(a))
+    PlaygroundState().render_export("midi", 8, str(b))
+    assert a.read_bytes() == b.read_bytes()                    # deterministic bounce
+    assert len(read_notes(str(a))) > 0                         # and it has notes
+
+
 def test_override_mirror_and_coercion():
     st = PlaygroundState()
     st.set_override("tempo_bpm", 132)

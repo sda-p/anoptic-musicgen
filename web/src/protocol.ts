@@ -115,6 +115,19 @@ export interface SchemaMsg {
   phrase_bars: number;
 }
 
+export interface AutomationPoint {
+  bar: number;
+  valence: number;
+  energy: number;
+  tension: number;
+}
+
+export interface AutomationTrack {
+  enabled: boolean;
+  loop_bars: number;
+  points: AutomationPoint[];
+}
+
 export interface SnapshotMsg {
   type: "snapshot";
   running: boolean;
@@ -125,6 +138,8 @@ export interface SnapshotMsg {
   slots: string[];
   console: Record<string, number>;
   sample: { name: string; root: number };
+  start_bar: number;
+  automation: AutomationTrack;
 }
 
 export interface BarMsg {

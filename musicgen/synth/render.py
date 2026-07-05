@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Callable
 
 from musicgen.clock import BeatClock
+from musicgen.control.automation import affect_at
 from musicgen.ir import Meter
 from musicgen.synth.console import Console, ConsoleConfig
 
@@ -144,6 +145,8 @@ class RealtimeSynthPlayer:
         prime_seconds: float = 0.3,
         on_bar: Callable | None = None,
         max_bars: int | None = None,
+        start_bar: int = 0,
+        automation=None,
     ) -> None:
         self.engine = engine
         self.config = config
@@ -151,6 +154,8 @@ class RealtimeSynthPlayer:
         self.prime_seconds = prime_seconds
         self.on_bar = on_bar
         self.max_bars = max_bars
+        self.start_bar = int(start_bar)  # jump-to-bar: warm the engine here before playing
+        self._automation = automation    # None, or (curve, loop_bars): affect driven per bar
         self._commands: list[tuple] = []
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -187,6 +192,14 @@ class RealtimeSynthPlayer:
         with self._lock:
             self._commands.append(("console", config))
 
+    def set_automation(self, curve, loop_bars: int) -> None:
+        """Drive affect from a breakpoint curve every bar; curve=None disables
+        (manual affect resumes). Evaluated on the generation thread keyed by the
+        engine's own bar, so it survives a seek and loops cleanly. This is the
+        live twin of control.automation — the demo ARCs made drawable."""
+        with self._lock:
+            self._commands.append(("automation", curve, loop_bars))
+
     def request_key(self, tonic, *, urgent: bool = False) -> None:
         with self._lock:
             self._commands.append(("key", tonic, urgent))
@@ -214,8 +227,21 @@ class RealtimeSynthPlayer:
                 self.engine.config.mapper = command[1]
             elif command[0] == "console":
                 self._pending_config = command[1]
+            elif command[0] == "automation":
+                self._automation = (command[1], command[2]) if command[1] else None
             elif command[0] == "key":
                 self.engine.request_key(command[1], urgent=command[2])
+
+    def _apply_automation(self) -> None:
+        """If an automation curve is active, set affect from it for the bar the
+        engine is about to generate (engine.state.bar), looping if configured."""
+        if self._automation is None:
+            return
+        curve, loop = self._automation
+        bar = self.engine.state.bar
+        if loop and loop > 0:
+            bar %= loop
+        self.engine.set_affect(**affect_at(curve, bar))
 
     def run(self) -> None:
         import numpy as np
@@ -250,6 +276,7 @@ class RealtimeSynthPlayer:
                 while (int(clock.time_at(next_bar * bar_quarters) * sr) < pos + lead_frames
                        and (self.max_bars is None or next_bar < self.max_bars)):
                     self._apply_pending()
+                    self._apply_automation()
                     result = self.engine.advance_bar()
                     for beat, bpm in result.tempo_points:
                         clock.add_tempo_point(beat, bpm)
@@ -262,6 +289,13 @@ class RealtimeSynthPlayer:
                                               (ev, clock.time_at(ev.end) - on)))
                         seq += 1
                     next_bar += 1
+
+            # jump-to-bar: deterministically fast-forward the engine to the seek
+            # target with no audio (generation is µs-cheap); the frame clock
+            # stays 0-based so playback begins immediately at that bar.
+            while self.engine.state.bar < self.start_bar and not self._stop.is_set():
+                self._apply_automation()
+                self.engine.advance_bar()
 
             stream.start()
             while not self._stop.is_set():

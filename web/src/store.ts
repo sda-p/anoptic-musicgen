@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type {
-  Affect, BarContext, EventDef, Lint, MappingGroup, ParamGroup, Params, SchemaMsg,
+  Affect, AutomationTrack, BarContext, EventDef, Lint, MappingGroup, ParamGroup, Params, SchemaMsg,
 } from "./protocol";
 
 export interface RollBar {
@@ -50,6 +50,9 @@ export interface MainState {
   consoleUi: MappingGroup[];
   consoleDefaults: Record<string, unknown>;
   sample: { name: string; root: number }; // loaded sampler file (name "" = synth bell)
+  startBar: number; // jump-to-bar: where play begins
+  automation: AutomationTrack; // drawable affect curve (the demo ARCs)
+  presets: string[]; // saved session names (fetched over REST)
   roll: RollBar[]; // rolling window of recent bars' events (piano-roll)
   lint: Lint; // live theory-lint status of the current bar
   phraseBars: number;
@@ -58,6 +61,8 @@ export interface MainState {
   schema: SchemaMsg | null;
   error: string | null;
 }
+
+const DEFAULT_AUTOMATION: AutomationTrack = { enabled: false, loop_bars: 0, points: [] };
 
 export const mainStore = createStore<MainState>({
   connected: false,
@@ -79,6 +84,9 @@ export const mainStore = createStore<MainState>({
   consoleUi: [],
   consoleDefaults: {},
   sample: { name: "", root: 72 },
+  startBar: 0,
+  automation: DEFAULT_AUTOMATION,
+  presets: [],
   roll: [],
   lint: { clean: true, violations: [] },
   phraseBars: 8,
