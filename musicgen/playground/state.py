@@ -63,6 +63,8 @@ class PlaygroundState:
         # EngineConfig's own affect defaults, mirrored so a rebuild resumes here
         self.affect = {"valence": 0.3, "energy": 0.5, "tension": 0.45}
         self.pinned: dict[str, object] = {}
+        self.slots: dict[str, MappingTable] = {}  # A/B mapping snapshots
+        self._console_config = None  # ConsoleConfig; lazy (pulls signalflow)
         self.player = None
 
     # ------------------------------------------------------------- lifecycle
@@ -74,16 +76,26 @@ class PlaygroundState:
             engine.set_override(name, value)
         return engine
 
+    def _cc(self):
+        if self._console_config is None:
+            from musicgen.synth.console import ConsoleConfig
+            self._console_config = ConsoleConfig(enable_meter=True)
+        return self._console_config
+
+    def _console_values(self) -> dict:
+        cc = self._cc()
+        return {f.name: getattr(cc, f.name) for f in fields(type(cc))
+                if isinstance(getattr(cc, f.name), (int, float)) and not isinstance(getattr(cc, f.name), bool)}
+
     def start(self, on_bar) -> None:
         if self.player is not None:
             return
-        from musicgen.synth.console import ConsoleConfig
         from musicgen.synth.render import RealtimeSynthPlayer
 
         player = RealtimeSynthPlayer(
             self._build_engine(), on_bar=on_bar,
             lead_seconds=_LEAD_SECONDS, prime_seconds=_PRIME_SECONDS,
-            config=ConsoleConfig(enable_meter=True),
+            config=self._cc(),
         )
         player.start()
         self.player = player
@@ -146,6 +158,32 @@ class PlaygroundState:
         if self.player is not None:
             self.player.set_mapping(self.mapper)
 
+    def reset_mapping(self) -> None:
+        self.mapper = MappingTable()
+        if self.player is not None:
+            self.player.set_mapping(self.mapper)
+
+    def store_mapping(self, slot: str) -> None:
+        self.slots[slot] = self.mapper  # frozen table; edits replace, never mutate
+
+    def recall_mapping(self, slot: str) -> None:
+        if slot in self.slots:
+            self.mapper = self.slots[slot]
+            if self.player is not None:
+                self.player.set_mapping(self.mapper)
+
+    def set_console_fields(self, updates: dict) -> None:
+        """Apply numeric ConsoleConfig edits — a STRUCTURAL change that rebuilds
+        the console (brief gap). Only numeric fields are exposed to the editor."""
+        cc = self._cc()
+        known = {f.name for f in fields(type(cc))}
+        applied = {name: float(value) for name, value in updates.items() if name in known}
+        if not applied:
+            return
+        self._console_config = replace(cc, **applied)
+        if self.player is not None:
+            self.player.set_console(self._console_config)
+
     def reseed(self, seed) -> None:
         self.seed = int(seed)  # takes effect on the next start()
 
@@ -159,4 +197,6 @@ class PlaygroundState:
             "pinned": {k: to_jsonable(v) for k, v in self.pinned.items()},
             "mapping": {f.name: to_jsonable(getattr(self.mapper, f.name))
                         for f in fields(MappingTable)},
+            "slots": sorted(self.slots),
+            "console": self._console_values(),
         }

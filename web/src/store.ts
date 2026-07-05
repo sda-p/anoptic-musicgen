@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { Affect, BarContext, ParamGroup, Params, SchemaMsg } from "./protocol";
+import type { Affect, BarContext, MappingGroup, ParamGroup, Params, SchemaMsg } from "./protocol";
 
 // A minimal external store: replace-and-notify. Two instances keep the 30 fps
 // meter feed off the per-bar telemetry store, so meter frames never re-render
@@ -34,6 +34,13 @@ export interface MainState {
   pinned: Record<string, unknown>; // name -> pinned value
   paramUi: ParamGroup[];
   paramDefaults: Record<string, unknown>; // per-param default (fallback when stopped)
+  mapping: Record<string, unknown>; // live MappingTable constant values
+  mappingUi: MappingGroup[];
+  mappingDefaults: Record<string, unknown>; // per-constant default (diff / revert)
+  slots: string[]; // filled A/B mapping snapshot slots
+  console: Record<string, number>; // applied ConsoleConfig numeric values
+  consoleUi: MappingGroup[];
+  consoleDefaults: Record<string, unknown>;
   bar: number | null;
   trace: string[];
   schema: SchemaMsg | null;
@@ -52,6 +59,13 @@ export const mainStore = createStore<MainState>({
   pinned: {},
   paramUi: [],
   paramDefaults: {},
+  mapping: {},
+  mappingUi: [],
+  mappingDefaults: {},
+  slots: [],
+  console: {},
+  consoleUi: [],
+  consoleDefaults: {},
   bar: null,
   trace: [],
   schema: null,

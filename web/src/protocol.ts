@@ -67,13 +67,27 @@ export interface ParamGroup {
   params: ParamSpec[];
 }
 
+export interface MappingFieldSpec {
+  name: string;
+  default: number | number[];
+  kind: "scalar" | "range";
+  step: number;
+}
+
+export interface MappingGroup {
+  group: string;
+  fields: MappingFieldSpec[];
+}
+
 export interface SchemaMsg {
   type: "schema";
   affect: Record<"valence" | "energy" | "tension", { min: number; max: number; default: number }>;
   overridable: string[];
   params: FieldDef[];
   mapping: FieldDef[];
+  mapping_ui: MappingGroup[];
   console: FieldDef[];
+  console_ui: MappingGroup[];
   instrument_tiers: [string, [string, number][]][];
   layer_gates: [string, number][];
   layers: string[];
@@ -91,6 +105,8 @@ export interface SnapshotMsg {
   affect: Affect;
   pinned: Record<string, unknown>;
   mapping: Record<string, unknown>;
+  slots: string[];
+  console: Record<string, number>;
 }
 
 export interface BarMsg {

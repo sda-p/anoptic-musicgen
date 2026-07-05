@@ -22,7 +22,8 @@ from musicgen.playground.state import PlaygroundState
 
 METER_HZ = 30.0
 # control messages that mutate server-mirrored state -> re-sync every client
-_SNAPSHOT_AFTER = {"set_override", "clear_override", "set_mapping", "transport", "reseed"}
+_SNAPSHOT_AFTER = {"set_override", "clear_override", "set_mapping", "reset_mapping",
+                   "mapping_store", "mapping_recall", "set_console", "transport", "reseed"}
 
 
 class Hub:
@@ -130,6 +131,14 @@ def _handle(msg: dict) -> None:
         state.request_key(msg["tonic"], bool(msg.get("urgent", False)))
     elif kind == "set_mapping":
         state.set_mapping_field(msg["field"], msg["value"])
+    elif kind == "reset_mapping":
+        state.reset_mapping()
+    elif kind == "mapping_store":
+        state.store_mapping(str(msg["slot"]))
+    elif kind == "mapping_recall":
+        state.recall_mapping(str(msg["slot"]))
+    elif kind == "set_console":
+        state.set_console_fields(msg["fields"])
     elif kind == "reseed":
         state.reseed(msg["seed"])
     elif kind == "transport":

@@ -67,6 +67,43 @@ def test_param_ui_and_mapped_ghost():
     json.dumps(m)
 
 
+def test_mapping_editor_and_ab_slots():
+    from dataclasses import fields as dfields
+
+    s = telemetry.schema()
+    ui = {f["name"] for g in s["mapping_ui"] for f in g["fields"]}
+    allf = {f.name for f in dfields(MappingTable)}
+    assert ui == allf - {"layer_gates", "instrument_tiers"}  # every constant but the nested structs
+    tr = next(f for g in s["mapping_ui"] for f in g["fields"] if f["name"] == "tempo_range")
+    assert tr["kind"] == "range" and tr["default"] == [60.0, 160.0]
+
+    st = PlaygroundState()
+    st.set_mapping_field("tempo_base", 99.0)
+    st.store_mapping("A")
+    st.set_mapping_field("tempo_base", 55.0)
+    assert st.snapshot()["mapping"]["tempo_base"] == 55.0
+    assert st.snapshot()["slots"] == ["A"]
+    st.recall_mapping("A")                     # A/B recall restores the stored table
+    assert st.snapshot()["mapping"]["tempo_base"] == 99.0
+    st.reset_mapping()
+    assert st.snapshot()["mapping"]["tempo_base"] == 70.0
+
+
+def test_console_tuner():
+    s = telemetry.schema()
+    names = {f["name"] for g in s["console_ui"] for f in g["fields"]}
+    assert {"fdn_t60", "shimmer_max", "limiter_ceiling"} <= names
+    assert all(f["kind"] == "scalar" for g in s["console_ui"] for f in g["fields"])
+
+    st = PlaygroundState()
+    assert st.snapshot()["console"]["fdn_t60"] == 2.2
+    st.set_console_fields({"fdn_t60": 3.5, "shimmer_max": 0.6})
+    snap = st.snapshot()
+    assert snap["console"]["fdn_t60"] == 3.5 and snap["console"]["shimmer_max"] == 0.6
+    st.set_console_fields({"bogus_field": 1.0})   # unknown field ignored, no crash
+    assert "bogus_field" not in st.snapshot()["console"]
+
+
 def test_override_mirror_and_coercion():
     st = PlaygroundState()
     st.set_override("tempo_bpm", 132)

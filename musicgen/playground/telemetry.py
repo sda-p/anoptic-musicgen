@@ -80,6 +80,56 @@ _ENUM_OPTIONS = {
     # "mode" options are filled from the brightness axis in schema()
 }
 
+# the live MappingTable heuristics editor, grouped by the table's own structure.
+# Scalar constants + tempo_range (a "range" of two floats); the two structural
+# fields (layer_gates, instrument_tiers) are omitted — nested-tuple editing is a
+# later concern, and they are edited in code today.
+_MAPPING_GROUPS = (
+    ("tempo", ("tempo_base", "tempo_energy", "tempo_valence", "tempo_range", "tempo_slew_per_beat")),
+    ("register", ("register_base", "register_valence", "register_tension")),
+    ("density / roughness", ("density_base", "density_energy", "roughness_base",
+                             "roughness_energy", "roughness_tension", "roughness_max")),
+    ("articulation", ("articulation_legato", "articulation_energy_drop", "articulation_slew_per_bar")),
+    ("dynamics", ("velocity_base", "velocity_energy", "velocity_slew_per_bar",
+                  "accent_base", "accent_energy")),
+    ("mode / layers", ("mode_hysteresis", "layer_hysteresis", "instrument_hysteresis")),
+    ("cadence / harmony", ("cadence_authentic_max", "cadence_half_max",
+                           "harmonic_slow_energy", "harmonic_slow_tension")),
+    ("filter / drive", ("cutoff_base_hz", "cutoff_energy_octaves", "cutoff_valence_octaves",
+                        "drive_base", "drive_energy")),
+    ("sends / width", ("reverb_send_base", "reverb_send_tension", "reverb_send_stillness",
+                       "delay_send_base", "delay_send_activity", "width_base", "width_valence")),
+)
+
+# the console (voice/mix) tuner — STRUCTURAL params applied via a rebuild.
+# Numeric ConsoleConfig fields only; the nested tuples (EQ, sends, mod-matrix,
+# FDN delays) are edited in code.
+_CONSOLE_GROUPS = (
+    ("reverb (FDN)", ("fdn_t60", "fdn_damping_hz", "reverb_predelay",
+                      "reverb_shelf_hz", "reverb_shelf_db")),
+    ("delay", ("delay_feedback", "delay_max_seconds")),
+    ("chorus", ("chorus_mix", "chorus_base", "chorus_depth")),
+    ("shimmer", ("shimmer_max", "shimmer_grain_rate", "shimmer_grain_duration",
+                 "shimmer_history_seconds")),
+    ("sweep", ("sweep_trigger_ratio", "sweep_depth")),
+    ("master / limiter", ("master_makeup", "limiter_ceiling", "limiter_release",
+                          "limiter_lookahead", "limiter_gain_smooth", "velocity_curve")),
+    ("sidechain (detect)", ("detect_sensitivity", "detect_release")),
+)
+
+
+def _step_for(default) -> float:
+    a = abs(float(default[0] if isinstance(default, tuple) else default))
+    if a < 0.05:
+        return 0.001
+    if a < 1.5:
+        return 0.01
+    if a < 15:
+        return 0.1
+    if a < 150:
+        return 1.0
+    return 10.0
+
 
 def mapped_targets(affect: tuple, mapper) -> dict:
     """What the mapping table would produce for each overridable param at this
@@ -156,9 +206,15 @@ def schema() -> dict:
         patches_by_layer.setdefault(layer, []).append(patch)
 
     console_fields: list[dict] = []
+    console_ui: list[dict] = []
     try:  # ConsoleConfig pulls signalflow — present under [playground], but stay soft
         from musicgen.synth.console import ConsoleConfig
         console_fields = _dataclass_fields(ConsoleConfig)
+        cc = ConsoleConfig()
+        for group, names in _CONSOLE_GROUPS:
+            console_ui.append({"group": group, "fields": [
+                {"name": n, "default": to_jsonable(getattr(cc, n)),
+                 "kind": "scalar", "step": _step_for(getattr(cc, n))} for n in names]})
     except Exception:  # noqa: BLE001
         pass
 
@@ -177,6 +233,16 @@ def schema() -> dict:
             rows.append(entry)
         param_ui.append({"group": group, "label": label, "params": rows})
 
+    mapping_ui = []
+    for group, names in _MAPPING_GROUPS:
+        fields_out = []
+        for name in names:
+            default = getattr(mt, name)
+            fields_out.append({"name": name, "default": to_jsonable(default),
+                               "kind": "range" if isinstance(default, tuple) else "scalar",
+                               "step": _step_for(default)})
+        mapping_ui.append({"group": group, "fields": fields_out})
+
     return {
         "type": "schema",
         "affect": {
@@ -187,7 +253,9 @@ def schema() -> dict:
         "overridable": sorted(OVERRIDABLE),
         "params": _dataclass_fields(MusicalParams),
         "mapping": _dataclass_fields(MappingTable),
+        "mapping_ui": mapping_ui,
         "console": console_fields,
+        "console_ui": console_ui,
         "instrument_tiers": to_jsonable(mt.instrument_tiers),
         "layer_gates": to_jsonable(mt.layer_gates),
         "layers": list(LAYER_NAMES),

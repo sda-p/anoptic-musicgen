@@ -30,6 +30,14 @@ function handle(msg: ServerMessage): void {
         schema: msg,
         paramUi: msg.param_ui,
         paramDefaults: Object.fromEntries(msg.params.map((p) => [p.name, p.default])),
+        mappingUi: msg.mapping_ui,
+        mappingDefaults: Object.fromEntries(
+          msg.mapping_ui.flatMap((g) => g.fields.map((f) => [f.name, f.default])),
+        ),
+        consoleUi: msg.console_ui,
+        consoleDefaults: Object.fromEntries(
+          msg.console_ui.flatMap((g) => g.fields.map((f) => [f.name, f.default])),
+        ),
       });
       break;
     case "snapshot":
@@ -38,6 +46,9 @@ function handle(msg: ServerMessage): void {
         seed: msg.seed,
         snapshotAffect: msg.affect,
         pinned: msg.pinned,
+        mapping: msg.mapping,
+        slots: msg.slots,
+        console: msg.console,
       });
       break;
     case "bar": {
@@ -83,4 +94,14 @@ export const api = {
     mainStore.set({ pinned });
     send({ type: "clear_override", name });
   },
+  // hot-edit a MappingTable constant (optimistic; the swap lands at the next bar)
+  setMapping: (field: string, value: unknown) => {
+    mainStore.set({ mapping: { ...mainStore.get().mapping, [field]: value } });
+    send({ type: "set_mapping", field, value });
+  },
+  resetMapping: () => send({ type: "reset_mapping" }),
+  storeMapping: (slot: string) => send({ type: "mapping_store", slot }),
+  recallMapping: (slot: string) => send({ type: "mapping_recall", slot }),
+  // structural console change: rebuilds the audio graph (a brief gap)
+  setConsole: (fields: Record<string, unknown>) => send({ type: "set_console", fields }),
 };

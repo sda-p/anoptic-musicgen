@@ -348,11 +348,45 @@ body {
 }
 
 /* ---- parameters: follow / pin grid --------------------------------------- */
-.pgrid-panel {
+.bottom-panel {
   flex: 0 0 auto;
-  max-height: 44vh;
+  max-height: 46vh;
   margin: 0 12px 12px;
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 14px 0;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.tab {
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 8px 14px;
+  background: transparent;
+  color: var(--dim);
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+.tab:hover {
+  color: var(--fg);
+}
+.tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.bottom-body {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
+  padding: 14px;
 }
 .pgrid {
   display: flex;
@@ -557,4 +591,169 @@ body {
 .layer-btn:disabled {
   cursor: default;
   opacity: 0.85;
+}
+
+/* ---- heuristics: live MappingTable editor -------------------------------- */
+.meditor {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.meditor-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.meditor-hint {
+  font-size: 11px;
+  color: var(--dim);
+  font-style: italic;
+}
+.ab-slots {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ab-slot {
+  display: flex;
+  gap: 4px;
+}
+.btn-sm {
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  background: var(--panel-2);
+  color: var(--fg);
+  border: 1px solid var(--line);
+}
+.btn-sm:hover:not(:disabled) {
+  border-color: var(--dim);
+}
+.btn-sm:disabled {
+  color: var(--dim);
+  opacity: 0.5;
+  cursor: default;
+}
+.btn-reset {
+  color: var(--warn);
+}
+.cgrid-cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 14px 22px;
+}
+.mgroup {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.mrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mrow-name {
+  flex: 1;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mrow.changed .mrow-name {
+  color: var(--accent);
+}
+.mrow-range {
+  display: flex;
+  gap: 4px;
+}
+.mfield {
+  width: 66px;
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 6px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+.mrow-range .mfield {
+  width: 56px;
+}
+.mrow.changed .mfield {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.revert {
+  font: inherit;
+  font-size: 12px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 5px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--accent-2);
+  border: 1px solid var(--line);
+}
+.revert:hover {
+  border-color: var(--dim);
+}
+.revert.hidden {
+  visibility: hidden;
+}
+
+/* ---- voices & mix (instruments picker + console tuner) ------------------- */
+.btn-apply {
+  color: var(--accent);
+}
+.dirty-note {
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--dim);
+  min-width: 74px;
+  text-align: right;
+}
+.voices-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.instruments {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+.instruments-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.instruments-head .prow-name {
+  flex: 0 0 auto;
+}
+.instruments-head .prow-boundary {
+  margin-right: auto;
+}
+.instruments-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px 18px;
+}
+.instrument-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.instrument-layer {
+  width: 56px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--dim);
 }

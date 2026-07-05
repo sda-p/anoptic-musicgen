@@ -157,6 +157,8 @@ class RealtimeSynthPlayer:
         self._thread: threading.Thread | None = None
         self.bars_played = 0
         self.console = None  # set once run() builds it; None while stopped
+        self._pending_config = None  # a ConsoleConfig to rebuild into (structural change)
+        self._last_result = None  # last applied bar, re-applied after a rebuild
 
     def set_affect(self, **kwargs) -> None:
         with self._lock:
@@ -176,6 +178,14 @@ class RealtimeSynthPlayer:
         and deterministic — the M12 live-heuristics path."""
         with self._lock:
             self._commands.append(("mapping", table))
+
+    def set_console(self, config) -> None:
+        """Swap the ConsoleConfig — a STRUCTURAL change (EQ, FDN, mod-matrix,
+        limiter…). Unlike the mapped DSP params (live via Smooth controls), this
+        rebuilds the console graph, so it lands with a brief gap. See the
+        live-vs-rebuild split in SYNTHESIS.md finding 9."""
+        with self._lock:
+            self._commands.append(("console", config))
 
     def request_key(self, tonic, *, urgent: bool = False) -> None:
         with self._lock:
@@ -202,6 +212,8 @@ class RealtimeSynthPlayer:
                 self.engine.clear_override(command[1])
             elif command[0] == "mapping":
                 self.engine.config.mapper = command[1]
+            elif command[0] == "console":
+                self._pending_config = command[1]
             elif command[0] == "key":
                 self.engine.request_key(command[1], urgent=command[2])
 
@@ -254,11 +266,29 @@ class RealtimeSynthPlayer:
             stream.start()
             while not self._stop.is_set():
                 self._apply_pending()  # ~11 ms cadence: live control lands within a block
+                if self._pending_config is not None:
+                    # structural console change: rebuild on a fresh graph (a
+                    # brief gap). Single-threaded, so this can't race the audio;
+                    # the engine position is untouched and last params re-applied.
+                    new_cfg = self._pending_config
+                    self._pending_config = None
+                    self.console = None
+                    active.clear()  # old voices died with the old graph
+                    graph.destroy()
+                    graph = sf.AudioGraph(output_device=sf.AudioOut_Dummy(2, sr, block), start=False)
+                    console = Console(graph, new_cfg)
+                    self.config = new_cfg
+                    self.console = console
+                    if self._last_result is not None:
+                        r = self._last_result
+                        console.apply_params(r.params, r.affect, r.params.tempo_bpm,
+                                             bar_seconds=bar_quarters * 60.0 / r.params.tempo_bpm)
                 generate_ahead()
 
                 while heap and heap[0][0] <= pos:
                     _, kind, _, payload = heapq.heappop(heap)
                     if kind == _KIND_PARAMS:
+                        self._last_result = payload
                         console.apply_params(payload.params, payload.affect, payload.params.tempo_bpm,
                                              bar_seconds=bar_quarters * 60.0 / payload.params.tempo_bpm)
                         self.bars_played += 1
