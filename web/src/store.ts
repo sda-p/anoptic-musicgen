@@ -49,6 +49,9 @@ export interface MainState {
   console: Record<string, number>; // applied ConsoleConfig numeric values
   consoleUi: MappingGroup[];
   consoleDefaults: Record<string, unknown>;
+  dramaturg: Record<string, number | boolean>; // live tension-debt-ledger config (§5.8)
+  dramaturgUi: MappingGroup[];
+  dramaturgDefaults: Record<string, unknown>;
   sample: { name: string; root: number }; // loaded sampler file (name "" = synth bell)
   startBar: number; // jump-to-bar: where play begins
   automation: AutomationTrack; // drawable affect curve (the demo ARCs)
@@ -83,6 +86,9 @@ export const mainStore = createStore<MainState>({
   console: {},
   consoleUi: [],
   consoleDefaults: {},
+  dramaturg: {},
+  dramaturgUi: [],
+  dramaturgDefaults: {},
   sample: { name: "", root: 72 },
   startBar: 0,
   automation: DEFAULT_AUTOMATION,

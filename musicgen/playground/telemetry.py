@@ -207,6 +207,12 @@ def _dataclass_fields(cls) -> list[dict]:
     return out
 
 
+# the dramaturg knobs surfaced for live tuning (enabled is a toggle, handled
+# separately; hold_tier is a str and max_debt a safety clamp — both omitted)
+_DRAMATURG_FIELDS = ["leniency", "accrue_above", "debt_gain", "escalate_phrases",
+                     "register_cap_max", "escalation_cap", "big_spend"]
+
+
 def schema() -> dict:
     """Everything the UI needs to render controls without hardcoding: affect
     ranges, the override whitelist, the MappingTable heuristic constants, the
@@ -263,6 +269,12 @@ def schema() -> dict:
                                "step": _step_for(default)})
         mapping_ui.append({"group": group, "fields": fields_out})
 
+    from musicgen.gen.dramaturg import DramaturgConfig
+    dc = DramaturgConfig()
+    dramaturg_ui = [{"group": "dramaturg · tension-debt ledger", "fields": [
+        {"name": n, "default": to_jsonable(getattr(dc, n)), "kind": "scalar",
+         "step": _step_for(getattr(dc, n))} for n in _DRAMATURG_FIELDS]}]
+
     return {
         "type": "schema",
         "affect": {
@@ -274,6 +286,7 @@ def schema() -> dict:
         "params": _dataclass_fields(MusicalParams),
         "mapping": _dataclass_fields(MappingTable),
         "mapping_ui": mapping_ui,
+        "dramaturg_ui": dramaturg_ui,
         "console": console_fields,
         "console_ui": console_ui,
         "instrument_tiers": to_jsonable(mt.instrument_tiers),

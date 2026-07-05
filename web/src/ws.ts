@@ -46,6 +46,10 @@ function handle(msg: ServerMessage): void {
         consoleDefaults: Object.fromEntries(
           msg.console_ui.flatMap((g) => g.fields.map((f) => [f.name, f.default])),
         ),
+        dramaturgUi: msg.dramaturg_ui,
+        dramaturgDefaults: Object.fromEntries(
+          msg.dramaturg_ui.flatMap((g) => g.fields.map((f) => [f.name, f.default])),
+        ),
         phraseBars: msg.phrase_bars,
       });
       break;
@@ -61,6 +65,7 @@ function handle(msg: ServerMessage): void {
         sample: msg.sample,
         startBar: msg.start_bar,
         automation: msg.automation,
+        dramaturg: msg.dramaturg,
       });
       break;
     case "bar": {
@@ -126,6 +131,11 @@ export const api = {
   recallMapping: (slot: string) => send({ type: "mapping_recall", slot }),
   // structural console change: rebuilds the audio graph (a brief gap)
   setConsole: (fields: Record<string, unknown>) => send({ type: "set_console", fields }),
+  // hot-swap dramaturg knobs (leniency etc. + the enable toggle); live, no rebuild
+  setDramaturg: (fields: Record<string, number | boolean>) => {
+    mainStore.set({ dramaturg: { ...mainStore.get().dramaturg, ...fields } });
+    send({ type: "set_dramaturg", fields });
+  },
   // drawable affect automation (optimistic; the server echoes a snapshot).
   // emit=false updates the store only — a drag previews locally at rAF cadence
   // and sends once on release, instead of flooding the socket per pointermove.

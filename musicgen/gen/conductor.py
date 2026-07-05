@@ -21,7 +21,7 @@ ConductorState (PLANS.md §9).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from musicgen.control import mapping
 from musicgen.control.levers import Affect, validate_override
@@ -29,6 +29,7 @@ from musicgen.control.mapping import MappingTable
 from musicgen.gen import structure
 from musicgen.gen.arp import ArpConfig, PATTERNS as ARP_PATTERNS, generate_arp
 from musicgen.gen.bass import BassConfig, generate_bass
+from musicgen.gen.dramaturg import Dramaturg, DramaturgConfig, Ledger
 from musicgen.gen.melody import MelodyConfig, MelodyState, Motif, generate_melody, make_motif
 from musicgen.gen.pad import generate_pad
 from musicgen.gen.perc import PercConfig, generate_perc
@@ -43,6 +44,7 @@ from musicgen.theory.scales import Scale
 from musicgen.theory.voicing import VoicingConfig
 
 DEFAULT_CADENCE_CYCLE = ("authentic", "half", "deceptive", "authentic")
+_MIN_MELODY_RANGE = 6  # floor the dramaturg's melody-range contraction stays above (lint-safe)
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,7 @@ class EngineConfig:
     phrase_bars: int = 8
     wander_phrases: int | None = None  # auto-modulate ±1 fifth every N phrases (None: never)
     cadence_policies: tuple[str, ...] | None = None  # None: tension-driven (mapper) / default cycle (static)
+    dramaturg: DramaturgConfig | None = None  # None: off (byte-identical); set: tension-debt ledger (§5.8, M13)
     mapper: MappingTable | None = None
     chains: dict[str, tuple] = field(default_factory=default_chains)  # {} disables modifiers
     harmony: HarmonyConfig = field(default_factory=HarmonyConfig)
@@ -101,6 +104,7 @@ class ConductorState:
     prev_bass_root: int | None = None
     melody: MelodyState = field(default_factory=MelodyState)
     motifs: dict[int, Motif] = field(default_factory=dict)
+    ledger: Ledger = field(default_factory=Ledger)  # dramaturg state (unused when disabled)
     last_fill: bool = False
     # key state (home lives in EngineConfig.key_tonic)
     key_tonic: int = 0
@@ -139,6 +143,7 @@ class MusicEngine:
         self.affect = Affect(cfg.valence, cfg.energy, cfg.tension).clamped()
         self.overrides: dict[str, object] = {}
         self._urgent = False
+        self.dramaturg = Dramaturg(cfg.dramaturg) if cfg.dramaturg is not None else None
 
         if cfg.mapper is not None:
             self.state.current_mode = cfg.mode or mapping.nearest_mode(self.affect.valence)
@@ -187,12 +192,22 @@ class MusicEngine:
 
     # --- internals -----------------------------------------------------------
 
+    @property
+    def _dramaturg_on(self) -> bool:
+        """Active only when a dramaturg exists AND its (hot-swappable) config is
+        enabled — so the disabled path is byte-identical to no dramaturg."""
+        return self.dramaturg is not None and self.dramaturg.cfg.enabled
+
     def _policy(self, phrase: int) -> str:
         plan = self.state.modulation
         if plan is not None and phrase == plan.cadence_phrase:
             return "authentic"  # the modulation IS this phrase's cadence
         if "cadence_policy" in self.overrides:
             return str(self.overrides["cadence_policy"])
+        if self._dramaturg_on:
+            forced = self.state.ledger.phrase_cadence.get(phrase)
+            if forced is not None:  # the dramaturg rations/releases the cadence (§5.8)
+                return forced
         if self.config.cadence_policies is not None:
             cycle = self.config.cadence_policies
             return cycle[phrase % len(cycle)]
@@ -248,6 +263,7 @@ class MusicEngine:
             piece_start=bar == 0,
             cfg=cfg.harmony,
             rng=self.seeder.stream("harmony", bar),
+            suppress_tonic=self._dramaturg_on and self.state.ledger.suppress_tonic,
         )
         self.state.prev_chord = chord
         return bar, chord, why
@@ -378,10 +394,30 @@ class MusicEngine:
         )
         return params, tempo_points
 
+    def _escalate(self, params: MusicalParams, intensify: float) -> MusicalParams:
+        """Escalation ladder (§5.8, M13): a sustained withhold keeps building —
+        push loudness / agitation / accent up with the escalation level (0..1),
+        even as the tonic and top tier stay withheld (a coiled spring, not a
+        plateau). Bounded so the intensified params stay in the mapped domain."""
+        return replace(
+            params,
+            velocity_center=min(120, params.velocity_center + round(intensify * 14)),
+            note_density=min(1.0, params.note_density + intensify * 0.20),
+            accent_depth=params.accent_depth + round(intensify * 4),
+        )
+
     def advance_bar(self) -> BarResult:
         cfg, state = self.config, self.state
         bar = state.bar
         pos = structure.phrase_position(bar, cfg.phrase_bars)
+
+        # Dramaturg (§5.8, M13): decide this phrase's cadence rationing at pos 0,
+        # before its cadence chord is generated ahead. Gated — a no-op when off.
+        directive = None
+        dramaturg_note = ""
+        if self._dramaturg_on:
+            directive = self.dramaturg.on_bar(state.ledger, self.affect.tension, pos)
+            dramaturg_note = directive.note
 
         if (cfg.wander_phrases is not None and pos.pos == 0 and bar > 0
                 and state.pending_key is None and state.modulation is None
@@ -408,6 +444,9 @@ class MusicEngine:
             pinned = self.overrides.get("mode", cfg.mode)
             state.current_mode = str(pinned) if pinned else mapping.pick_mode(
                 state.current_mode, self.affect.valence, cfg.mapper)
+            if directive is not None and directive.brighten and not pinned:
+                # the dramaturg spend brightens the mode a same-tonic step or two (§5.8, M13)
+                state.current_mode = mapping.brighter_mode(state.current_mode, directive.brighten)
             self._urgent = False
         self.scale = Scale(self._tonic_for_bar(bar), state.current_mode)
 
@@ -416,6 +455,15 @@ class MusicEngine:
         else:
             params = cfg.params
             tempo_points = [(0.0, params.tempo_bpm)] if bar == 0 else []
+
+        # Dramaturg withholding (§5.8, M13): hold a tier out of the gate set and,
+        # on a sustained hold, escalate intensity — both released on the spend.
+        if directive is not None:
+            if directive.lock_layers:
+                params = replace(params, layers=tuple(
+                    lyr for lyr in params.layers if lyr not in directive.lock_layers))
+            if directive.intensify:
+                params = self._escalate(params, directive.intensify)
 
         while len(state.chord_queue) < 2:
             next_needed = state.chord_queue[-1][0] + 1 if state.chord_queue else bar
@@ -450,6 +498,8 @@ class MusicEngine:
 
         events: list[NoteEvent] = []
         trace = [f"bar {bar + 1} [{pos.slot}] {ctx.chord_sym} ({self.scale.name}): {chord_trace}"]
+        if dramaturg_note:
+            trace.append(dramaturg_note)
         if instr_note:
             trace.append(instr_note)
         layers = params.layers
@@ -469,9 +519,15 @@ class MusicEngine:
             state.prev_bass_root = root
             trace.append(bass_trace)
         if "melody" in layers:
+            mel_cfg = cfg.melody
+            if directive is not None and directive.register_cap:
+                # contract the melody's ambit while withholding; it opens back up
+                # on the spend (register_cap is 0 then) — the audible bloom
+                mel_cfg = replace(cfg.melody, range_semitones=max(
+                    _MIN_MELODY_RANGE, cfg.melody.range_semitones - directive.register_cap))
             mel_events, mel_state, mel_trace = generate_melody(
                 ctx, cfg.meter, params, pos, self._motif(pos.phrase, params),
-                state.melody, cfg.melody, self.seeder.stream("melody", bar),
+                state.melody, mel_cfg, self.seeder.stream("melody", bar),
             )
             events.extend(mel_events)
             state.melody = mel_state

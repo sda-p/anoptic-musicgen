@@ -17,6 +17,7 @@ from musicgen.control.automation import affect_at
 from musicgen.control.levers import validate_override
 from musicgen.control.mapping import MappingTable
 from musicgen.gen.conductor import EngineConfig, MusicEngine
+from musicgen.gen.dramaturg import DramaturgConfig
 from musicgen.playground.telemetry import to_jsonable
 
 # a tighter look-ahead than the demos: generation is µs-fast, so a small buffer
@@ -80,12 +81,15 @@ class PlaygroundState:
         self.automation = {"enabled": False, "loop_bars": 0,
                            "points": [dict(p) for p in _DEFAULT_AUTOMATION]}
         self.exporting = False  # an offline bounce owns the one graph; blocks start()
+        # dramaturg present but OFF by default -> byte-identical to no dramaturg (§5.8, M13)
+        self._dramaturg_config = DramaturgConfig(enabled=False)
         self.player = None
 
     # ------------------------------------------------------------- lifecycle
     def _build_engine(self) -> MusicEngine:
         cfg = EngineConfig(mapper=self.mapper, valence=self.affect["valence"],
-                           energy=self.affect["energy"], tension=self.affect["tension"])
+                           energy=self.affect["energy"], tension=self.affect["tension"],
+                           dramaturg=self._dramaturg_config)
         engine = MusicEngine(seed=self.seed, config=cfg)
         for name, value in self.pinned.items():
             engine.set_override(name, value)
@@ -222,6 +226,18 @@ class PlaygroundState:
         self._console_config = replace(cc, **applied)
         if self.player is not None:
             self.player.set_console(self._console_config)
+
+    def set_dramaturg_fields(self, updates: dict) -> None:
+        """Hot-swap dramaturg knobs (leniency etc. + the enable toggle) live —
+        applied at the next bar edge on the generation thread, ledger preserved.
+        No rebuild (unlike the console)."""
+        known = {f.name: getattr(self._dramaturg_config, f.name) for f in fields(DramaturgConfig)}
+        applied = {k: _match_type(known[k], v) for k, v in updates.items() if k in known}
+        if not applied:
+            return
+        self._dramaturg_config = replace(self._dramaturg_config, **applied)
+        if self.player is not None:
+            self.player.set_dramaturg(self._dramaturg_config)
 
     def set_sample(self, path: str, root_midi: int) -> None:
         """Load an uploaded audio file into the sampler ("keys") voice — a
@@ -377,4 +393,6 @@ class PlaygroundState:
             "automation": {"enabled": self.automation["enabled"],
                            "loop_bars": self.automation["loop_bars"],
                            "points": [dict(p) for p in self.automation["points"]]},
+            "dramaturg": {f.name: to_jsonable(getattr(self._dramaturg_config, f.name))
+                          for f in fields(DramaturgConfig)},
         }

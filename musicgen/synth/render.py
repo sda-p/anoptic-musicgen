@@ -198,6 +198,13 @@ class RealtimeSynthPlayer:
         with self._lock:
             self._commands.append(("automation", curve, loop_bars))
 
+    def set_dramaturg(self, cfg) -> None:
+        """Hot-swap the dramaturg's (frozen) config between bars — leniency and
+        the other knobs plus the enable toggle. The ledger state is preserved (it
+        lives on the engine's ConductorState, not the config)."""
+        with self._lock:
+            self._commands.append(("dramaturg", cfg))
+
     def request_key(self, tonic, *, urgent: bool = False) -> None:
         with self._lock:
             self._commands.append(("key", tonic, urgent))
@@ -227,6 +234,12 @@ class RealtimeSynthPlayer:
                 self._pending_config = command[1]
             elif command[0] == "automation":
                 self._automation = (command[1], command[2]) if command[1] else None
+            elif command[0] == "dramaturg":
+                if self.engine.dramaturg is not None:
+                    self.engine.dramaturg.cfg = command[1]  # swap knobs, keep the ledger
+                else:
+                    from musicgen.gen.dramaturg import Dramaturg
+                    self.engine.dramaturg = Dramaturg(command[1])
             elif command[0] == "key":
                 self.engine.request_key(command[1], urgent=command[2])
 

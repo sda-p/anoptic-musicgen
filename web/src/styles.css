@@ -1101,3 +1101,18 @@ body {
   color: var(--accent);
   align-self: flex-start;
 }
+
+/* ---- dramaturg controls (§5.8, in the heuristics tab) --------------------- */
+.dramaturg-ctl {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.dramaturg-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}

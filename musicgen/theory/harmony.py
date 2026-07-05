@@ -42,6 +42,7 @@ class HarmonyConfig:
     repeat_penalty: float = 0.25        # weight multiplier for repeating a degree
     borrow_prob_max: float = 0.35       # borrowing probability at valence -1
     phrase_open_tonic_boost: float = 1.6
+    tonic_suppress: float = 0.05        # weight on degree 1 in T while the dramaturg withholds (§5.8)
 
 
 def _weighted(rng: random.Random, pairs: list[tuple[object, float]]) -> object:
@@ -49,11 +50,15 @@ def _weighted(rng: random.Random, pairs: list[tuple[object, float]]) -> object:
     return rng.choices(values, weights=weights)[0]
 
 
-def _choose_degree(function: str, prev_degree: int | None, cfg: HarmonyConfig, rng: random.Random) -> int:
+def _choose_degree(function: str, prev_degree: int | None, cfg: HarmonyConfig,
+                   rng: random.Random, suppress_tonic: bool = False) -> int:
     pairs = [
         (d, w * (cfg.repeat_penalty if d == prev_degree else 1.0))
         for d, w in FUNCTION_CHORDS[function]
     ]
+    if suppress_tonic and function == "T":
+        # dramaturg withholding: circle the tonic via vi/iii instead of landing on I
+        pairs = [(d, w * cfg.tonic_suppress if d == 1 else w) for d, w in pairs]
     return _weighted(rng, pairs)
 
 
@@ -108,8 +113,11 @@ def next_chord(
     piece_start: bool,
     cfg: HarmonyConfig = HarmonyConfig(),
     rng: random.Random,
+    suppress_tonic: bool = False,
 ) -> tuple[Chord, str]:
-    """One step of the functional walk. Returns (chord, trace)."""
+    """One step of the functional walk. Returns (chord, trace). suppress_tonic
+    biases a tonic-function bar away from I (toward vi/iii) — the dramaturg's
+    root-position-tonic withholding (§5.8); it never touches the cadence slots."""
     if piece_start:
         return Chord(1, extensions=_choose_extensions(1, tension, False, rng)), "piece start: establish tonic"
 
@@ -139,7 +147,7 @@ def next_chord(
     if phrase_start:
         weights["T"] *= cfg.phrase_open_tonic_boost
     function = _weighted(rng, list(weights.items()))
-    degree = _choose_degree(function, prev.degree if prev else None, cfg, rng)
+    degree = _choose_degree(function, prev.degree if prev else None, cfg, rng, suppress_tonic)
     source = _maybe_borrow(degree, mode, valence, cfg, rng)
     chord = Chord(degree, extensions=_choose_extensions(degree, tension, False, rng), source_mode=source)
     trace = (

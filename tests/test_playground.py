@@ -106,6 +106,22 @@ def test_console_tuner():
     assert st._console_config.sample_path == ""
 
 
+def test_dramaturg_controls():
+    s = telemetry.schema()
+    names = {f["name"] for g in s["dramaturg_ui"] for f in g["fields"]}
+    assert {"leniency", "accrue_above", "escalate_phrases"} <= names
+
+    st = PlaygroundState()
+    assert st.snapshot()["dramaturg"]["enabled"] is False   # off by default -> byte-identical baseline
+    st.set_dramaturg_fields({"enabled": True, "leniency": 0.8, "escalate_phrases": 3})
+    d = st.snapshot()["dramaturg"]
+    assert d["enabled"] is True
+    assert d["leniency"] == 0.8 and isinstance(d["leniency"], float)
+    assert d["escalate_phrases"] == 3 and isinstance(d["escalate_phrases"], int)
+    st.set_dramaturg_fields({"bogus_knob": 1.0})            # unknown field ignored, no crash
+    assert "bogus_knob" not in st.snapshot()["dramaturg"]
+
+
 def test_sampler_load_clear():
     st = PlaygroundState()
     assert st.snapshot()["sample"] == {"name": "", "root": 72}

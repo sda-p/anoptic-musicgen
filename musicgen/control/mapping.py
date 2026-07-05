@@ -155,6 +155,15 @@ def pick_mode(current: str | None, valence: float, t: MappingTable) -> str:
     return nearest_mode(valence)
 
 
+def brighter_mode(mode: str, steps: int) -> str:
+    """Step `steps` positions up the brightness ordering, clamped at the
+    brightest — a same-tonic parallel lift (the dramaturg's payoff brightening)."""
+    if steps <= 0 or mode not in BRIGHTNESS:
+        return mode
+    order = sorted(BRIGHTNESS, key=lambda m: BRIGHTNESS[m])
+    return order[min(len(order) - 1, order.index(mode) + steps)]
+
+
 def pick_instruments(
     current: tuple[tuple[str, str], ...], energy: float, t: MappingTable,
 ) -> tuple[tuple[str, str], ...]:
