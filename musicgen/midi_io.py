@@ -31,6 +31,15 @@ LAYER_MIDI = {
     "perc": LayerSpec(channel=9, program=None),
 }
 
+# Semantic patch names (MusicalParams.instruments) -> GM programs. The calm
+# tier matches the LayerSpec defaults, so runs without swaps sound as before.
+GM_PATCHES = {
+    ("pad", "warm"): 89, ("pad", "bright"): 90,      # Pad 2 (warm) / Pad 3 (polysynth)
+    ("bass", "round"): 33, ("bass", "driven"): 38,   # Finger bass / Synth Bass 1
+    ("melody", "soft"): 11, ("melody", "hard"): 81,  # Vibraphone / Lead 2 (sawtooth)
+    ("arp", "pluck"): 46, ("arp", "glass"): 98,      # Orchestral Harp / FX 3 (crystal)
+}
+
 _CHANNEL_TO_LAYER = {spec.channel: layer for layer, spec in LAYER_MIDI.items()}
 
 
@@ -62,10 +71,13 @@ def write_midi(
     tempo_map: Sequence[tuple[float, float]] = ((0.0, 100.0),),  # (beat, bpm)
     meter: Meter = Meter(),
     markers: Sequence[tuple[float, str]] = (),
+    instrument_changes: Sequence[tuple[float, str, str]] = (),  # (beat, layer, patch)
     end_pad_beats: float = 1.0,
 ) -> Path:
     """Write events as SMF type 1: a conductor track (time signature, tempo
-    map, markers) plus one track per layer present."""
+    map, markers) plus one track per layer present. instrument_changes emit
+    GM program changes (GM_PATCHES); a layer without a beat-0 entry gets its
+    LayerSpec default, so old callers are unchanged."""
     by_layer: dict[str, list[NoteEvent]] = {}
     for ev in sorted(events, key=lambda e: (e.start, e.pitch)):
         by_layer.setdefault(ev.layer, []).append(ev)
@@ -92,7 +104,14 @@ def write_midi(
         if not evs:
             continue
         msgs: list[tuple[int, int, mido.Message]] = []
-        if spec.program is not None:
+        for beat, change_layer, patch in instrument_changes:
+            if change_layer != layer:
+                continue
+            if (layer, patch) not in GM_PATCHES:
+                raise ValueError(f"no GM program for patch {patch!r} on layer {layer!r}")
+            msgs.append((beats_to_ticks(beat), 0, mido.Message(
+                "program_change", channel=spec.channel, program=GM_PATCHES[(layer, patch)])))
+        if spec.program is not None and not any(tick == 0 for tick, _, _ in msgs):
             msgs.append((0, 0, mido.Message("program_change", channel=spec.channel, program=spec.program)))
         for ev in evs:
             on, off = beats_to_ticks(ev.start), beats_to_ticks(ev.end)

@@ -48,6 +48,7 @@ def dump_bars(
         by_bar.setdefault(meter.bar_of(ev.start), []).append(ev)
 
     lines: list[str] = []
+    shown_instruments: dict[str, str] = {}
     for bar in sorted(set(by_bar) | set(ctx_by_bar)):
         ctx = ctx_by_bar.get(bar)
         head = [f"── bar {bar + 1:>3}"]
@@ -83,6 +84,11 @@ def dump_bars(
             )
             bits.append("layers " + ("+".join(bar_params.layers) or "-"))
             lines.append("   levers │ " + " │ ".join(bits))
+            if dict(bar_params.instruments) != shown_instruments:
+                changed = [f"{layer}={patch}" for layer, patch in bar_params.instruments
+                           if shown_instruments.get(layer) != patch]
+                lines.append("   instr  │ " + " ".join(changed))
+                shown_instruments = dict(bar_params.instruments)
         for layer in LAYER_NAMES:
             layer_events = [e for e in by_bar.get(bar, []) if e.layer == layer]
             for i, ev in enumerate(layer_events):

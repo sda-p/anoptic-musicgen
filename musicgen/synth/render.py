@@ -48,10 +48,15 @@ def render_offline(
     tail_seconds: float = 2.5,
     block: int = 1024,
     config: ConsoleConfig | None = None,
+    dither: bool = True,
 ) -> Path:
-    """Note: signalflow may print "Warning: buffer overrun?" during dense
+    """dither adds deterministic TPDF noise at 1 LSB of 16-bit before the
+    final quantization (and only there — never while the signal stays float).
+
+    Note: signalflow may print "Warning: buffer overrun?" during dense
     passages — that is its realtime CPU>100% check firing while we render
     faster than realtime. Harmless here (see SYNTHESIS.md, findings)."""
+    import numpy as np
     import signalflow as sf
 
     path = Path(path)
@@ -98,6 +103,12 @@ def render_offline(
                 heapq.heappush(active, (pos + int(total * sample_rate), layer, node))
 
         _drain_until(graph, console, total_frames, pos, active, block)
+        if dither:
+            # TPDF at +-1 LSB, seeded: renders stay bit-reproducible
+            rng = np.random.default_rng(0x0D17)
+            shape = np.asarray(capture.data).shape
+            noise = (rng.random(shape) - rng.random(shape)) * (1.0 / 32768.0)
+            capture.data[:] = np.asarray(capture.data) + noise.astype(np.float32)
         capture.save(str(path))
     finally:
         graph.destroy()

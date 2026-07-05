@@ -33,11 +33,20 @@ def emit(
     if not tempo_points:
         tempo_points = [(0.0, results[0].params.tempo_bpm)]
 
+    instrument_changes: list[tuple[float, str, str]] = []
+    applied: dict[str, str] = {}
+    for r in results:
+        for layer, patch in r.params.instruments:
+            if applied.get(layer) != patch:
+                applied[layer] = patch
+                instrument_changes.append((r.bar * meter.bar_quarters, layer, patch))
+
     mid = midi_io.write_midi(
         out_dir / f"{stem}.mid",
         events,
         tempo_map=tempo_points,
         meter=meter,
+        instrument_changes=instrument_changes,
         markers=[
             (c.bar * meter.bar_quarters,
              f"bar {c.bar + 1}: {c.chord_sym}"

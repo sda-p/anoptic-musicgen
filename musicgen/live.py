@@ -25,7 +25,7 @@ import mido
 
 from musicgen.audition import DEFAULT_SF2
 from musicgen.clock import BeatClock
-from musicgen.midi_io import LAYER_MIDI
+from musicgen.midi_io import GM_PATCHES, LAYER_MIDI
 
 __all__ = ["BeatClock", "LivePlayer", "schedule_bar", "setup_programs",
            "find_output_port", "spawn_fluidsynth", "open_output"]
@@ -86,6 +86,7 @@ class LivePlayer:
         self.on_bar = on_bar
         self.max_bars = max_bars
         self._commands: list[tuple] = []
+        self._instruments: dict[str, str] = {}  # last program sent per layer
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -155,6 +156,14 @@ class LivePlayer:
                     seq += len(entries)
                     for entry in entries:
                         heapq.heappush(heap, entry)
+                    bar_time = clock.time_at(result.bar * bar_quarters)
+                    for layer, patch in result.params.instruments:
+                        if self._instruments.get(layer) != patch:
+                            self._instruments[layer] = patch
+                            heapq.heappush(heap, _Entry(bar_time, 0, seq, "midi", mido.Message(
+                                "program_change", channel=LAYER_MIDI[layer].channel,
+                                program=GM_PATCHES[(layer, patch)])))
+                            seq += 1
                     next_bar += 1
 
                 while heap and heap[0].time <= now + 0.001:

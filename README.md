@@ -21,8 +21,9 @@ game / script / keyboard        set_affect(valence, energy, tension)
         │                       request_key("Eb")
         ▼
 mapping table   affect → tempo, mode (Lydian..Phrygian), density, roughness,
-(control/)      articulation, dynamics, register, layer gates, dissonance
-        │       budget, cadence policy — every constant in one dataclass
+(control/)      articulation, dynamics, register, layer gates, instrument
+        │       tiers (energy re-orchestrates timbre), dissonance budget,
+        │       cadence policy — every constant in one dataclass
         ▼
 conductor       pull-based: advance_bar() → one bar of theory-annotated
 (gen/)          events. Functional harmony walk (T→PD→D) with cadence slots,
@@ -57,7 +58,7 @@ default soundfont path: `/usr/share/sounds/sf2/FluidR3_GM.sf2`).
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev,live]"   # live extra = python-rtmidi (Linux/ALSA)
-.venv/bin/python -m pytest               # 172 tests
+.venv/bin/python -m pytest               # 190 tests
 ```
 
 The generation core is stdlib-only; `mido`/`rtmidi` are confined to the MIDI
@@ -76,6 +77,7 @@ and `--no-audio`; most accept `--bars N`, and the single-render demos take
 | `demos/demo_live.py` | Real-time playback through FluidSynth with the levers on the keyboard (`a/z` `s/x` `d/c` nudge, `1–5` act presets, `o/l` tempo override, `m/n` modulate a fifth). `--selftest 8` verifies the audio chain hands-free |
 | `demos/demo_modulation.py` | Pivot-chord key changes: scripted requests (C → G → Eb → urgent snap home) plus the automatic wander policy — dumps annotate the pivot in both keys |
 | `demos/demo_meters.py` | The same seed and lever arc in 4/4, 3/4 (waltz), and 6/8 (compound: two dotted-quarter pulses drive drums, bass, melody, and accents) |
+| `demos/demo_instruments.py` | Energy staircase through the instrument tiers — pad/bass/melody/arp each swap patches at their own threshold, with hysteresis staggering the way back down. Notes identical; only timbre moves |
 | `demos/demo_axes.py` | 3×3 grid over (valence × energy) at fixed seed — hear each axis in isolation |
 | `demos/demo_tension.py` | Tension swept 0 → 1 → 0: watch cadences shift authentic → half → deceptive and extensions accumulate |
 | `demos/demo_seeds.py` | Same levers, five seeds — variety under identical control |
@@ -83,7 +85,7 @@ and `--no-audio`; most accept `--bars N`, and the single-render demos take
 | `demos/m2_full.py` | Full texture at static levers (`--mode aeolian --valence -0.7` is a good time) |
 | `demos/m1_harmony.py` | Harmony backbone only: progression walk + voice-led pad + bass |
 | `demos/m0_smoke.py` | Minimal pipeline check: hardcoded I–IV–V–I through MIDI/dump/audio |
-| `demos/demo_synth.py` | The journey through the **signalflow synthesis backend** (`pip install -e ".[synth]"`): subtractive/FM voices, lever-driven filter/send/drive automation, tempo-synced delay, hand-rolled reverb, kick-triggered ducking. `--live` plays in real time. See `SYNTHESIS.md` |
+| `demos/demo_synth.py` | The journey through the **signalflow synthesis backend** (`pip install -e ".[synth]"`): subtractive/FM voices, lever-driven filter/send/drive automation, per-strip EQ, bus chorus, ping-pong delay, hand-rolled FDN reverb, sidechain ducking, lookahead limiting, dithered export. `--live` plays in real time. See `SYNTHESIS.md` |
 
 Example:
 
@@ -141,6 +143,8 @@ research.md          # background survey the design distilled from
 
 ## Status
 
-Prototype; core scope complete, including real key modulation (pivot
-chords), triple and compound meters (3/4, 6/8, 12/8), and the signalflow DSP
-backend. Deliberately out of scope for now: energy-driven instrument swaps.
+Prototype; the base feature set is complete — theory-driven generation,
+affect levers, modifiers, live mode, the signalflow DSP backend, real key
+modulation (pivot chords), triple and compound meters (3/4, 6/8, 12/8), and
+energy-driven instrument swaps. What remains is deepening the DSP vocabulary
+(roadmap in `SYNTHESIS.md`).

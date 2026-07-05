@@ -157,6 +157,11 @@ class MusicalParams:
     harmonic_rhythm: float = 1.0  # chords per bar
     dissonance_budget: float = 0.0
     cadence_policy: str = "authentic"
+    # (layer, patch) pairs, energy-tiered by the mapper. Patch names are
+    # semantic; midi_io maps them to GM programs, synth/patches to voice
+    # variants. Defaults are the calm tier (the original fixed sounds).
+    instruments: tuple[tuple[str, str], ...] = (
+        ("pad", "warm"), ("bass", "round"), ("melody", "soft"), ("arp", "pluck"))
     # --- DSP tier (consumed by the synth backend; inert on the MIDI path) ---
     filter_cutoff: float = 2500.0  # Hz, master brightness for subtractive voices
     reverb_send: float = 0.20      # 0..1 global send scale

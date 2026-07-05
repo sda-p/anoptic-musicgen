@@ -113,6 +113,7 @@ class ConductorState:
     current_velocity: float = 0.0
     current_articulation: float = 0.0
     active_layers: tuple[str, ...] = ()
+    current_instruments: tuple[tuple[str, str], ...] = ()
     phrase_policies: dict[int, str] = field(default_factory=dict)
     last_emitted_tempo: float | None = None
 
@@ -373,6 +374,7 @@ class MusicEngine:
             delay_send=float(ov.get("delay_send", mapping.delay_send_target(a, table))),
             drive=float(ov.get("drive", mapping.drive_target(a, table))),
             stereo_width=float(ov.get("stereo_width", mapping.stereo_width_target(a, table))),
+            instruments=state.current_instruments,
         )
         return params, tempo_points
 
@@ -385,6 +387,20 @@ class MusicEngine:
                 and state.pending_key is None and state.modulation is None
                 and pos.phrase - state.last_key_phrase >= cfg.wander_phrases):
             state.pending_key = (self._wander_target(pos.phrase), False)
+
+        # Instrument swaps are phrase-quantized like mode (urgent demotes to
+        # the barline) but ignore the modulation window — timbre is harmless
+        # to the pivot analysis. Read _urgent before the mode block clears it.
+        instr_note = ""
+        if cfg.mapper is not None and (pos.pos == 0 or self._urgent):
+            pinned_instr = self.overrides.get("instruments")
+            picked = (tuple(pinned_instr) if pinned_instr is not None  # type: ignore[arg-type]
+                      else mapping.pick_instruments(state.current_instruments, self.affect.energy, cfg.mapper))
+            if picked != state.current_instruments:
+                changed = [f"{layer}={patch}" for layer, patch in picked
+                           if dict(state.current_instruments).get(layer) != patch]
+                instr_note = f"instruments: {' '.join(changed)} (energy {self.affect.energy:.2f})"
+                state.current_instruments = picked
 
         # The mode holds while a modulation window is active so the pivot
         # analysis stays true; a deferred urgent flag fires after arrival.
@@ -434,6 +450,8 @@ class MusicEngine:
 
         events: list[NoteEvent] = []
         trace = [f"bar {bar + 1} [{pos.slot}] {ctx.chord_sym} ({self.scale.name}): {chord_trace}"]
+        if instr_note:
+            trace.append(instr_note)
         layers = params.layers
         if "pad" in layers:
             pad_events, voicing, pad_trace = generate_pad(ctx, cfg.meter, params, state.prev_voicing, cfg.voicing)

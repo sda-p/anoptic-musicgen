@@ -27,12 +27,12 @@ voices           plain node chains with EXPLICIT lifecycle: the scheduler
 
 ## Voice inventory (techniques exercised)
 
-| Layer | Design |
+| Layer | Design (calm tier → hot tier, energy-swapped) |
 |---|---|
-| pad | 3 detuned saws (unison ±0.4%) → shared-cutoff lowpass → slow ASR; strip-level StereoWidth |
-| bass | saw + sub-octave sine → lowpass with plucky filter envelope (cutoff × env) |
-| melody | triangle/saw blend, delayed vibrato (LFO depth ramped by a Line) → lowpass |
-| arp | 2-op FM pluck: 3:1 ratio, modulation index on a fast-decay envelope |
+| pad | 3 detuned saws (±0.4%) → shared-cutoff lowpass → slow ASR; strip StereoWidth. **bright**: ±0.9% spread, cutoff ×1.7, resonance up, fast bloom |
+| bass | saw + sub-octave sine → lowpass with plucky filter envelope. **driven**: tanh pre-drive, deeper/hotter sweep |
+| melody | triangle/saw blend, delayed vibrato (LFO depth ramped by a Line) → lowpass. **hard**: saw/square stack, earlier+deeper vibrato, snappy attack |
+| arp | 2-op FM pluck: 3:1 ratio, index on a fast-decay envelope. **glass**: inharmonic 7:1, hotter index, longer shimmer |
 | kick | sine with pitch-drop envelope (129→44 Hz) + band-passed noise click |
 | snare | band-passed noise rattle + 195 Hz tonal body, separate decays |
 | hats/shaker/crash | filtered noise families: HP short/long, BP resonant, shimmer layer |
@@ -40,24 +40,37 @@ voices           plain node chains with EXPLICIT lifecycle: the scheduler
 
 Velocity maps to amplitude through a ^1.5 curve; bass/pad/melody share
 lever-driven cutoff Smooths (scaled per layer), so one retarget sweeps every
-sounding voice — node fanout, not per-voice bookkeeping.
+sounding voice — node fanout, not per-voice bookkeeping. Cutoff also
+**keytracks** per voice (a scalar factor `(f/261.63)^kt` baked in at
+allocation — pitch is known then, so tracking costs nothing at render time).
 
-## Console topology
+## Console topology (v2 as of M10)
 
-- **Strips** per layer: gain trim → (pad only) StereoWidth → duck gain (pad, arp).
+- **Strips** per layer: gain trim → **3-band channel EQ** (bass owns the
+  lows, pad clears mud, melody/arp get presence and air, perc keeps thump
+  and snap) → (pad) **bus chorus** (two taps modulated at 0.6/0.73 Hz,
+  panned wide, 35% mix) → (pad) StereoWidth → duck gain (pad, arp).
 - **Reverb bus**: per-layer send gains × global send Smooth → mono sum →
-  20 ms predelay → hand-rolled **Schroeder reverb** (4 parallel combs
-  29.7/37.1/41.1/43.7 ms, fb .77–.71 → 2 series allpasses) → lowpass tone.
-  signalflow ships no reverb node; the C library won't either — this is the
-  algorithm to port (or upgrade to FDN).
-- **Delay bus**: sends → feedback comb, **delay time tempo-synced** to a
-  dotted 8th (retargeted per bar from the live BPM).
-- **Ducking**: schedule-driven sidechain — every kick retriggers a shared
-  ASR envelope that dips pad/arp strip gains (depth ← energy²). The symbolic
-  layer already knows what an audio detector would have to rediscover.
+  20 ms predelay → 2 input-diffusion allpasses → hand-rolled **4-line FDN**
+  (Householder matrix `y_i = x_i − Σx/2`; inharmonic delays 33.7/45.3/57.7/
+  68.9 ms; **lowpass damping inside the loop** — the thing Schroeder combs
+  couldn't express with stock nodes; per-line gain `10^(−3d/T60)` for a
+  uniform T60 = 2.2 s) → high-shelf tone (−4 dB @ 4.5 kHz). Built on
+  signalflow's feedback buffer pair — see finding 5 for the constraint.
+- **Delay bus**: **tempo-synced ping-pong** — feedforward taps over one
+  feedback comb (`ping = x + comb(x, 2d)·f²`, L taps at d, R at 2d·f) give
+  alternating-side echoes without a cross-channel feedback loop.
+- **Ducking**: schedule-driven sidechain by default — every kick retriggers
+  a shared ASR envelope that dips pad/arp strips (depth ← energy²); the
+  symbolic layer already knows what a detector would rediscover.
+  `sidechain="detect"` switches to an envelope follower on the drum strip —
+  the technique needed when the trigger source is unscheduled audio.
 - **Master**: soft saturation `tanh(x·(1+4·drive))` with post-scale →
   glue compressor (thr .30, ratio 2.5:1, 12/180 ms) → fixed makeup into a
-  tanh knee → hard clip guard at ±0.95.
+  tanh knee → DC blocker → **lookahead limiter** (5 ms, ceiling 0.92,
+  sliding-window-max detector — finding 6) → hard clip guard at ±0.95.
+- **Export**: deterministic **TPDF dither** at ±1 LSB, added only at the
+  final 16-bit quantization, never while the signal stays float.
 
 ## Lever → DSP mapping (extends control/mapping.py)
 
@@ -69,6 +82,7 @@ sounding voice — node fanout, not per-voice bookkeeping.
 | `drive` | energy² | saturation blooms late |
 | `stereo_width` | valence | dark = narrow, bright = wide |
 | duck depth | energy² | pumping appears with intensity |
+| `instruments` | energy tiers | phrase-quantized patch swaps (voice presets, finding 4) |
 
 Two smoothing tiers, deliberately: the **mapper** slews musically (per bar,
 boundary-quantized); the **console** glides at audio rate (one-pole Smooth,
@@ -79,11 +93,15 @@ the engine's conductor port provides the first.
 
 Primitives: band-limited saw/square/triangle/sine, white noise, wavetable
 (future); ASR/ADSR envelopes with curve shaping **and retrigger**; one-pole
-smoothing on every audible parameter; SVF (LP/HP/BP + resonance); comb and
-allpass delays with runtime-variable delay time; stereo pan and mid/side
-width; tanh saturator; hard clip; feedback compressor with **specified,
-bounded makeup behavior** (see findings); mono summing; buses with dynamic
-voice attach/detach.
+smoothing on every audible parameter; SVF (LP/HP/BP + resonance); biquads
+with **peak and shelf types** (dB gains) and a cheap 3-band channel EQ; comb
+and allpass delays with runtime-variable delay time (chorus = a modulated
+tap); a **feedback loop primitive** (write/read pair or single-sample loops
+— finding 5); **asymmetric one-pole followers and a sliding-window max**
+(finding 6), channel-linked detector option; DC blocker; stereo pan and
+mid/side width; tanh saturator; hard clip; feedback compressor with
+**specified, bounded makeup behavior** (see findings); TPDF dither at the
+final quantization; mono summing; buses with dynamic voice attach/detach.
 
 Semantics: DAG with node fanout (shared control nodes feeding many voices);
 block rendering that can **split blocks at arbitrary sample offsets** for
@@ -109,12 +127,35 @@ graph; device/render block sizes decoupled and explicit.
    trip it constantly while the whole render finishes 10x faster than the
    piece). For the C library: separate "deadline missed" reporting from
    headless rendering, and expose per-block CPU stats instead of printing.
+4. **Instrument swaps are presets, not new DSP.** Every energy-tier variant
+   (M9) is the same voice topology with different constants — detune spread,
+   envelope times, filter scaling, FM ratio. A sounding voice keeps its patch;
+   the swap applies from the next allocation, boundary-quantized upstream.
+   For the C library: voices need a preset/parameter-block concept resolved
+   at allocation time — no live-patching of a voice's topology, no per-voice
+   branching in the render loop.
+5. **Feedback loops have a one-block minimum in block-based graphs.**
+   signalflow's feedback buffer pair makes the FDN possible (in-loop damping,
+   arbitrary matrices) but rejects loop delays shorter than one hardware
+   block — fine for reverb lines (>30 ms), prohibitive for flangers (<10 ms)
+   and impossible for one-sample recursions. The console now refuses to
+   build an FDN that violates it, with the device buffer in the message.
+   For the C library: feedback is a first-class need at THREE granularities —
+   sample (filters, followers), short-loop (flanger/comb), and block (FDN).
+6. **Peak detectors need self-feedback; graph-pure workarounds exist but
+   teach the requirement.** A "follower" built from Abs + symmetric Smooth +
+   If tracks averages, not peaks — the first limiter leaked 1.4% of samples
+   into the clip guard because its envelope forgot each peak within samples.
+   The fix is a gapless **sliding-window max by doubling** (max(w, w@2^k)
+   cascades, O(log n) nodes) spanning the lookahead, but the real lesson is
+   the missing ten-line primitive `env = max(|x|, a·env)`. Related: one-pole
+   gain smoothing never fully converges inside the lookahead (we tolerate
+   ~1% of a step); a linear attack ramp hits the target exactly. And RMS
+   that reports once per block quantizes detector timing to the block.
 
 ## Roadmap (authored-production techniques not yet exercised)
 
-Per-strip EQ · audio-detected sidechain compression (vs. the schedule-driven
-duck) · chorus/flanger/phaser · ping-pong delay · FDN or convolution reverb ·
-sampler/wavetable layers and hybrid (synth + recorded) instruments ·
-granular textures · lookahead limiting · per-voice keytracking and a general
-mod matrix · audio-rate automation curves · stereo unison voice spreading ·
-dither on export.
+Sampler/wavetable layers and hybrid (synth + recorded) instruments ·
+granular textures · a general mod matrix · audio-rate automation curves ·
+convolution reverb · flanger/phaser (blocked in signalflow by the one-block
+feedback minimum, finding 5 — a native C short-loop primitive unblocks them).

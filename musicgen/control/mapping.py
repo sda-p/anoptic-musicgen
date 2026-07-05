@@ -67,6 +67,17 @@ class MappingTable:
     # mode selection (brightness axis), phrase-quantized in the conductor
     mode_hysteresis: float = 0.60
 
+    # instrument swaps by energy (vertical re-orchestration), phrase-quantized
+    # in the conductor: per layer, the highest tier whose threshold is cleared
+    # wins; hysteresis keeps the current patch until energy falls clear of it
+    instrument_tiers: tuple[tuple[str, tuple[tuple[str, float], ...]], ...] = (
+        ("pad", (("warm", 0.0), ("bright", 0.60))),
+        ("bass", (("round", 0.0), ("driven", 0.62))),
+        ("melody", (("soft", 0.0), ("hard", 0.55))),
+        ("arp", (("pluck", 0.0), ("glass", 0.72))),
+    )
+    instrument_hysteresis: float = 0.08
+
     # cadence policy by tension
     cadence_authentic_max: float = 0.35
     cadence_half_max: float = 0.65
@@ -142,6 +153,24 @@ def pick_mode(current: str | None, valence: float, t: MappingTable) -> str:
     if abs(brightness_target(valence) - BRIGHTNESS[current]) < t.mode_hysteresis:
         return current
     return nearest_mode(valence)
+
+
+def pick_instruments(
+    current: tuple[tuple[str, str], ...], energy: float, t: MappingTable,
+) -> tuple[tuple[str, str], ...]:
+    """Energy-tiered patch per layer with a deadband: the sitting patch's
+    threshold is lowered by instrument_hysteresis so hovering energy does not
+    flap the orchestration at every phrase boundary."""
+    held = dict(current)
+    out = []
+    for layer, tiers in t.instrument_tiers:
+        chosen = tiers[0][0]
+        for name, threshold in tiers:
+            effective = threshold - (t.instrument_hysteresis if held.get(layer) == name else 0.0)
+            if energy >= effective:
+                chosen = name
+        out.append((layer, chosen))
+    return tuple(out)
 
 
 def gate_layers(current: tuple[str, ...], energy: float, t: MappingTable) -> tuple[str, ...]:
