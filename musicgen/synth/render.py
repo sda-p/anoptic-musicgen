@@ -26,7 +26,13 @@ _KIND_PARAMS, _KIND_NOTE, _KIND_REMOVE = 0, 1, 2
 
 def _drain_until(graph, console, target_frame: int, pos: int, active: list, block: int) -> int:
     """Render up to target_frame, detaching finished voices at their exact
-    frames along the way. Returns the new position."""
+    frames along the way. Returns the new position.
+
+    Heap entries are (end_frame, seq, layer, node): the seq tiebreaker is
+    load-bearing — same-frame voices are common (chords), and comparing
+    signalflow node objects CONSTRUCTS comparison nodes inside the live
+    graph (operator overloading), which then die at GC-determined moments
+    mid-render. See SYNTHESIS.md finding 8."""
     while pos < target_frame:
         stop = min(target_frame, active[0][0] if active else target_frame)
         while pos < stop:
@@ -34,7 +40,7 @@ def _drain_until(graph, console, target_frame: int, pos: int, active: list, bloc
             graph.render(step)
             pos += step
         while active and active[0][0] <= pos:
-            _, layer, node = heapq.heappop(active)
+            _, _, layer, node = heapq.heappop(active)
             console.remove(layer, node)
     return pos
 
@@ -92,15 +98,18 @@ def render_offline(
         graph.add_node(recorder)
 
         pos = 0
-        active: list[tuple[int, str, object]] = []  # (end_frame, layer, node) heap
+        seq = 0
+        active: list[tuple[int, int, str, object]] = []  # (end_frame, seq, layer, node) heap
         for frame, kind, payload in schedule:
             pos = _drain_until(graph, console, frame, pos, active, block)
             if kind == _KIND_PARAMS:
-                console.apply_params(payload.params, payload.affect, payload.params.tempo_bpm)
+                console.apply_params(payload.params, payload.affect, payload.params.tempo_bpm,
+                                     bar_seconds=meter.bar_quarters * 60.0 / payload.params.tempo_bpm)
             else:
                 ev, dur_seconds = payload
                 layer, node, total = console.note_on(ev, dur_seconds)
-                heapq.heappush(active, (pos + int(total * sample_rate), layer, node))
+                heapq.heappush(active, (pos + int(total * sample_rate), seq, layer, node))
+                seq += 1
 
         _drain_until(graph, console, total_frames, pos, active, block)
         if dither:
@@ -211,7 +220,8 @@ class RealtimeSynthPlayer:
                 while heap and heap[0][0] <= now + 0.002:
                     _, kind, _, payload = heapq.heappop(heap)
                     if kind == _KIND_PARAMS:
-                        console.apply_params(payload.params, payload.affect, payload.params.tempo_bpm)
+                        console.apply_params(payload.params, payload.affect, payload.params.tempo_bpm,
+                                             bar_seconds=bar_quarters * 60.0 / payload.params.tempo_bpm)
                         self.bars_played += 1
                         if self.on_bar is not None:
                             self.on_bar(payload)

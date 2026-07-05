@@ -33,6 +33,8 @@ voices           plain node chains with EXPLICIT lifecycle: the scheduler
 | bass | saw + sub-octave sine → lowpass with plucky filter envelope. **driven**: tanh pre-drive, deeper/hotter sweep |
 | melody | triangle/saw blend, delayed vibrato (LFO depth ramped by a Line) → lowpass. **hard**: saw/square stack, earlier+deeper vibrato, snappy attack |
 | arp | 2-op FM pluck: 3:1 ratio, index on a fast-decay envelope. **glass**: inharmonic 7:1, hotter index, longer shimmer |
+| pad "morph" (M11) | **morphing wavetable**: 4 procedurally-built frames (dark → bright additive tables), Wavetable2D crossfade scanned by an envelope per note — audio-rate timbre automation inside the voice |
+| melody "keys" (M11) | **sampler**: a numpy-synthesized bell "recording" (inharmonic partials + chiff) repitched from its C5 root by `2^(Δn/12)` — higher notes ring shorter and brighter, the honest resampling artifact; still obeys the cutoff lever |
 | kick | sine with pitch-drop envelope (129→44 Hz) + band-passed noise click |
 | snare | band-passed noise rattle + 195 Hz tonal body, separate decays |
 | hats/shaker/crash | filtered noise families: HP short/long, BP resonant, shimmer layer |
@@ -71,6 +73,22 @@ allocation — pitch is known then, so tracking costs nothing at render time).
   sliding-window-max detector — finding 6) → hard clip guard at ±0.95.
 - **Export**: deterministic **TPDF dither** at ±1 LSB, added only at the
   final 16-bit quantization, never while the signal stays float.
+- **Granular shimmer (M11)**: a HistoryBufferWriter records the pad strip's
+  last 2 s; a Granulator sprays octave-up grains from it (seeded stochastic
+  clock, random position and per-grain pan) into the reverb bus. Density and
+  amount ride tension² — the unsettled-air texture, synthesized from the
+  piece's own audio.
+- **Mod matrix (M11)**: declarative `(source, destination, depth)` routes
+  over shared sources (two LFOs, smoothed sample&hold drift, the tension and
+  energy levers). Destination semantics are typed: cutoff is a ratio
+  (`× (1 + Σ)`), width and shimmer are additive-clipped. Default routes
+  breathe the filter and sway the width.
+- **Audio-rate sweeps (M11)**: a large upward cutoff retarget spawns a
+  one-shot envelope (attack ≈ one bar) summed on a sweep bus that scales
+  cutoff — the same target the one-pole would glide to in 45 ms, arriving
+  as a shaped musical swell instead. One-shot-per-event replaces shared
+  retriggered envelopes throughout: overlaps sum, and each envelope is
+  immutable once born, like a voice.
 
 ## Lever → DSP mapping (extends control/mapping.py)
 
@@ -83,6 +101,7 @@ allocation — pitch is known then, so tracking costs nothing at render time).
 | `stereo_width` | valence | dark = narrow, bright = wide |
 | duck depth | energy² | pumping appears with intensity |
 | `instruments` | energy tiers | phrase-quantized patch swaps (voice presets, finding 4) |
+| shimmer send/density | tension² | granular air thickens as things get unresolved |
 
 Two smoothing tiers, deliberately: the **mapper** slews musically (per bar,
 boundary-quantized); the **console** glides at audio rate (one-pole Smooth,
@@ -91,8 +110,12 @@ the engine's conductor port provides the first.
 
 ## What the C library therefore needs
 
-Primitives: band-limited saw/square/triangle/sine, white noise, wavetable
-(future); ASR/ADSR envelopes with curve shaping **and retrigger**; one-pole
+Primitives: band-limited saw/square/triangle/sine, white noise, **wavetable
+oscillators with 2D morph position** (frames interpolated at audio rate,
+range-contract-checked — finding 7); a **sampler** (buffer playback with
+rate repitch, root-key mapping, loop points); a **granular engine** (grain
+clock/position/duration/pan/rate all modulatable, reading live history
+buffers); ASR/ADSR envelopes with curve shaping **and retrigger**; one-pole
 smoothing on every audible parameter; SVF (LP/HP/BP + resonance); biquads
 with **peak and shelf types** (dB gains) and a cheap 3-band channel EQ; comb
 and allpass delays with runtime-variable delay time (chorus = a modulated
@@ -107,7 +130,11 @@ Semantics: DAG with node fanout (shared control nodes feeding many voices);
 block rendering that can **split blocks at arbitrary sample offsets** for
 event accuracy; voice lifecycle owned by the scheduler, not a collector;
 headless faster-than-realtime rendering and realtime output through the same
-graph; device/render block sizes decoupled and explicit.
+graph; device/render block sizes decoupled and explicit; a **mod matrix** as
+data (source × destination × depth) with per-destination combination
+semantics (ratio vs additive-clipped) declared, not implied; **every
+stochastic primitive takes an explicit seed** — no hidden global entropy
+(finding 8).
 
 ## Findings the hard way (each cost a debugging session)
 
@@ -152,10 +179,34 @@ graph; device/render block sizes decoupled and explicit.
    gain smoothing never fully converges inside the lookahead (we tolerate
    ~1% of a step); a linear attack ramp hits the target exactly. And RMS
    that reports once per block quantizes detector timing to the block.
+7. **Parameter ranges are safety contracts, not documentation.** Wavetable2D's
+   morph position is normalized 0..1 with an unguarded interpolation read at
+   the edge — feeding it 0..3 (a reasonable guess: "frames minus one")
+   segfaulted the process from a MUSICAL parameter. For the C library: every
+   buffer-position input declares clamp-or-wrap semantics, enforced in the
+   node, validated loudly in debug builds.
+8. **Determinism is a feature you must test for — with a scrambled heap.**
+   Full renders diverged between in-process runs while every isolated
+   subsystem reproduced perfectly; three real defects hid behind one
+   another: (a) stochastic nodes seed from global entropy unless explicitly
+   seeded (fixed per-role seeds also give drum-machine hit consistency);
+   (b) our scheduler compared signalflow node objects as heap tiebreakers —
+   and this library's overloaded comparisons CONSTRUCT graph nodes, so ties
+   allocated phantom nodes mid-render that died at GC-determined moments;
+   (c) the root cause, found by valgrind after bisection kept shifting:
+   FeedbackBufferReader never initializes its phase, so every FDN line's
+   loop delay depended on stale heap contents — zero pages in a fresh
+   process (hiding the bug), garbage on a warm one. Worked around with a
+   looped BufferPlayer (same semantics, initialized phase). For the C
+   library: run analyzers on all DSP state, and make "render twice on a
+   deliberately churned heap, diff bit-exactly" a CI gate.
 
 ## Roadmap (authored-production techniques not yet exercised)
 
-Sampler/wavetable layers and hybrid (synth + recorded) instruments ·
-granular textures · a general mod matrix · audio-rate automation curves ·
-convolution reverb · flanger/phaser (blocked in signalflow by the one-block
-feedback minimum, finding 5 — a native C short-loop primitive unblocks them).
+Hybrid instruments over recorded assets (the sampler machinery exists;
+shipping real samples is a content decision) · drawn automation curves
+(event-shaped sweeps exist; general ramp-to-target-in-T needs a C primitive,
+finding 6) · convolution reverb (no FFT convolve upstream — partitioned
+convolution is its own C subsystem) · flanger/phaser (blocked by the
+one-block feedback minimum, finding 5 — a native short-loop primitive
+unblocks them).

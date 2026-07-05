@@ -35,8 +35,10 @@ LAYER_MIDI = {
 # tier matches the LayerSpec defaults, so runs without swaps sound as before.
 GM_PATCHES = {
     ("pad", "warm"): 89, ("pad", "bright"): 90,      # Pad 2 (warm) / Pad 3 (polysynth)
+    ("pad", "morph"): 94,                            # Pad 7 (halo) — wavetable analog
     ("bass", "round"): 33, ("bass", "driven"): 38,   # Finger bass / Synth Bass 1
     ("melody", "soft"): 11, ("melody", "hard"): 81,  # Vibraphone / Lead 2 (sawtooth)
+    ("melody", "keys"): 8,                           # Celesta — sampled-bell analog
     ("arp", "pluck"): 46, ("arp", "glass"): 98,      # Orchestral Harp / FX 3 (crystal)
 }
 

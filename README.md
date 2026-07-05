@@ -58,7 +58,7 @@ default soundfont path: `/usr/share/sounds/sf2/FluidR3_GM.sf2`).
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev,live]"   # live extra = python-rtmidi (Linux/ALSA)
-.venv/bin/python -m pytest               # 190 tests
+.venv/bin/python -m pytest               # 197 tests
 ```
 
 The generation core is stdlib-only; `mido`/`rtmidi` are confined to the MIDI
@@ -86,6 +86,7 @@ and `--no-audio`; most accept `--bars N`, and the single-render demos take
 | `demos/m1_harmony.py` | Harmony backbone only: progression walk + voice-led pad + bass |
 | `demos/m0_smoke.py` | Minimal pipeline check: hardcoded I–IV–V–I through MIDI/dump/audio |
 | `demos/demo_synth.py` | The journey through the **signalflow synthesis backend** (`pip install -e ".[synth]"`): subtractive/FM voices, lever-driven filter/send/drive automation, per-strip EQ, bus chorus, ping-pong delay, hand-rolled FDN reverb, sidechain ducking, lookahead limiting, dithered export. `--live` plays in real time. See `SYNTHESIS.md` |
+| `demos/demo_voices.py` | The M11 voice engine: morphing wavetable pads, a sampled-bell melody (repitched from its root key), tension-driven granular shimmer from the music's own audio, mod-matrix breathing, bar-long filter sweeps |
 
 Example:
 

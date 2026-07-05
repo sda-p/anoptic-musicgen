@@ -29,6 +29,97 @@ def _keytrack(freq: float, amount: float) -> float:
     return min(2.5, max(0.5, (freq / 261.63) ** amount))
 
 
+def _noise(seed: int):
+    """Seeded white noise. signalflow's stochastic nodes otherwise seed from
+    a global entropy pool, making renders irreproducible (SYNTHESIS.md
+    finding 8). Fixed per-role seeds also mean every kick/snare transient is
+    identical — drum-machine consistency; Humanize supplies the variation."""
+    noise = sf.WhiteNoise()
+    noise.set_seed(seed)
+    return noise
+
+
+# --- shared sample/wavetable resources (built per console, numpy-synthesized:
+# --- no recorded assets, but the machinery is the real sampler machinery) ----
+
+WAVETABLE_FRAMES = 4
+SAMPLE_ROOT_MIDI = 72  # the bell sample's native pitch (C5)
+
+
+def make_wavetable_bank():
+    """Buffer2D of single-cycle frames morphing dark -> bright: harmonic n at
+    1/n^k with k falling per frame, odd harmonics leading. Built once per
+    console; Wavetable2D's crossfade input scans it at audio rate."""
+    import numpy as np
+
+    frames = []
+    n = 2048
+    t = np.arange(n) / n
+    for f in range(WAVETABLE_FRAMES):
+        rolloff = 2.3 - 0.45 * f
+        wave = np.zeros(n)
+        for h in range(1, 24):
+            amp = 1.0 / h ** rolloff
+            if h % 2 == 0:
+                amp *= 0.35 + 0.2 * f  # even harmonics fade in across frames
+            wave += amp * np.sin(2 * np.pi * h * t)
+        wave *= 0.9 / np.abs(wave).max()
+        frames.append(sf.Buffer([wave.astype(np.float32)]))
+    return sf.Buffer2D(frames)
+
+
+def make_bell_sample(sample_rate: int):
+    """A struck-bell 'recording' synthesized into a Buffer: inharmonic
+    partials (tubular-bell ratios) with independent decays and a noise chiff.
+    Deterministic, so renders stay bit-reproducible."""
+    import numpy as np
+
+    dur = 1.6
+    n = int(dur * sample_rate)
+    t = np.arange(n) / sample_rate
+    f0 = 440.0 * 2.0 ** ((SAMPLE_ROOT_MIDI - 69) / 12.0)
+    partials = ((1.0, 1.0, 1.9), (2.76, 0.6, 3.2), (5.40, 0.25, 4.8), (8.93, 0.12, 7.0))
+    wave = np.zeros(n)
+    for ratio, amp, decay in partials:
+        wave += amp * np.sin(2 * np.pi * f0 * ratio * t) * np.exp(-decay * t)
+    rng = np.random.default_rng(0xBE11)
+    chiff = rng.standard_normal(int(0.012 * sample_rate)) * np.linspace(1, 0, int(0.012 * sample_rate))
+    wave[: chiff.size] += chiff * 0.4
+    wave *= 0.8 / np.abs(wave).max()
+    buf = sf.Buffer(1, n)
+    buf.data[0][:] = wave.astype(np.float32)
+    return buf
+
+
+def wavetable_pad_voice(freq: float, amp: float, dur: float, cutoff, bank) -> tuple[object, float]:
+    """Morphing wavetable pad: the crossfade input scans the bank dark ->
+    bright over the note (audio-rate timbre automation inside the voice).
+    crossfade is NORMALIZED 0..1 across the bank and its edge reads are
+    unguarded in signalflow (>1.0 segfaults) — clamp hard, always."""
+    morph = sf.ASREnvelope(min(1.2, max(0.3, dur * 0.6)), max(dur - 1.2, 0.05), 1.0, curve=1.2)
+    osc = sf.Wavetable2D(bank, freq, crossfade=sf.Clip(morph * min(1.0, amp * 1.4), 0.0, 0.999))
+    attack = min(0.4, dur * 0.35)
+    release = 0.9
+    env = sf.ASREnvelope(attack, max(dur - attack, 0.05), release, curve=1.5)
+    filt = sf.SVFilter(osc, "low_pass", cutoff=cutoff * 1.2 * _keytrack(freq, 0.2), resonance=0.12)
+    return sf.StereoPanner(filt * env * amp * 0.8, 0.0), dur + release
+
+
+def sampler_voice(pitch: int, amp: float, dur: float, cutoff, sample, sample_rate: int) -> tuple[object, float]:
+    """Sampled bell repitched from its root key: rate = 2^(dn/12), so higher
+    notes ring shorter and brighter — the honest resampling artifact. The
+    lever-driven filter still applies (sampled layers obey the same levers)."""
+    rate = 2.0 ** ((pitch - SAMPLE_ROOT_MIDI) / 12.0)
+    natural = sample.num_frames / sample_rate / rate
+    player = sf.BufferPlayer(sample, rate=rate, loop=False)
+    total = min(natural, dur + 1.2)
+    env = sf.ASREnvelope(0.001, max(total - 0.4, 0.02), 0.4, curve=2.0)
+    filt = sf.SVFilter(player, "low_pass",
+                       cutoff=cutoff * 1.5 * _keytrack(440.0 * 2 ** ((pitch - 69) / 12), 0.2),
+                       resonance=0.0)
+    return sf.StereoPanner(filt * env * amp, 0.08), total
+
+
 def pad_voice(freq: float, amp: float, dur: float, cutoff, variant: str = "warm") -> tuple[object, float]:
     """Three detuned saws -> lowpass -> slow envelope. "bright": the unison
     voices spread across the stereo field (per-voice pan at allocation),
@@ -105,7 +196,7 @@ def _kick(amp: float) -> tuple[object, float]:
     pitch_env = sf.ASREnvelope(0.0005, 0.0, 0.09, curve=4.0)
     body = sf.SineOscillator(44 + pitch_env * 85)
     click = (
-        sf.SVFilter(sf.WhiteNoise(), "band_pass", cutoff=3500, resonance=0.4)
+        sf.SVFilter(_noise(0xD1C4), "band_pass", cutoff=3500, resonance=0.4)
         * sf.ASREnvelope(0.0005, 0.0, 0.012, curve=3.0) * 0.5
     )
     env = sf.ASREnvelope(0.001, 0.02, 0.22, curve=3.0)
@@ -114,7 +205,7 @@ def _kick(amp: float) -> tuple[object, float]:
 
 def _snare(amp: float) -> tuple[object, float]:
     rattle = (
-        sf.SVFilter(sf.WhiteNoise(), "band_pass", cutoff=1900, resonance=0.3)
+        sf.SVFilter(_noise(0xD5A2), "band_pass", cutoff=1900, resonance=0.3)
         * sf.ASREnvelope(0.001, 0.01, 0.16, curve=3.0) * 0.8
     )
     tone = sf.SineOscillator(195) * sf.ASREnvelope(0.001, 0.0, 0.08, curve=3.0) * 0.4
@@ -123,7 +214,7 @@ def _snare(amp: float) -> tuple[object, float]:
 
 def _rim(amp: float) -> tuple[object, float]:
     hit = (
-        sf.SVFilter(sf.WhiteNoise(), "band_pass", cutoff=4500, resonance=0.6)
+        sf.SVFilter(_noise(0xD814), "band_pass", cutoff=4500, resonance=0.6)
         * sf.ASREnvelope(0.0005, 0.0, 0.045, curve=3.0)
     )
     return sf.StereoPanner(hit * amp, 0.1), 0.06
@@ -132,7 +223,7 @@ def _rim(amp: float) -> tuple[object, float]:
 def _hat(amp: float, open_hat: bool) -> tuple[object, float]:
     decay = 0.28 if open_hat else 0.045
     noise = (
-        sf.SVFilter(sf.WhiteNoise(), "high_pass", cutoff=7800, resonance=0.2)
+        sf.SVFilter(_noise(0xDCA7), "high_pass", cutoff=7800, resonance=0.2)
         * sf.ASREnvelope(0.001, 0.005 if open_hat else 0.0, decay, curve=3.0)
     )
     return sf.StereoPanner(noise * amp * 0.7, -0.22), decay + 0.03
@@ -142,22 +233,22 @@ def _tom(freq: float):
     def build(amp: float) -> tuple[object, float]:
         pitch_env = sf.ASREnvelope(0.001, 0.0, 0.18, curve=3.0)
         body = sf.SineOscillator(freq * (1.0 + pitch_env * 0.55))
-        thump = sf.WhiteNoise() * sf.ASREnvelope(0.0005, 0.0, 0.02, curve=3.0) * 0.2
+        thump = _noise(0xD703) * sf.ASREnvelope(0.0005, 0.0, 0.02, curve=3.0) * 0.2
         env = sf.ASREnvelope(0.001, 0.02, 0.30, curve=2.5)
         return sf.StereoPanner((body + thump) * env * amp, 0.0), 0.36
     return build
 
 
 def _crash(amp: float) -> tuple[object, float]:
-    wash = sf.SVFilter(sf.WhiteNoise(), "high_pass", cutoff=5200, resonance=0.1)
-    shimmer = sf.SVFilter(sf.WhiteNoise(), "band_pass", cutoff=9000, resonance=0.6) * 0.5
+    wash = sf.SVFilter(_noise(0xDC4A), "high_pass", cutoff=5200, resonance=0.1)
+    shimmer = sf.SVFilter(_noise(0xDC4B), "band_pass", cutoff=9000, resonance=0.6) * 0.5
     env = sf.ASREnvelope(0.002, 0.05, 1.3, curve=2.5)
     return sf.StereoPanner((wash + shimmer) * env * amp * 0.6, 0.15), 1.45
 
 
 def _shaker(amp: float) -> tuple[object, float]:
     noise = (
-        sf.SVFilter(sf.WhiteNoise(), "band_pass", cutoff=6300, resonance=0.5)
+        sf.SVFilter(_noise(0xD5AC), "band_pass", cutoff=6300, resonance=0.5)
         * sf.ASREnvelope(0.015, 0.0, 0.06, curve=1.5)
     )
     return sf.StereoPanner(noise * amp * 0.6, -0.3), 0.10
