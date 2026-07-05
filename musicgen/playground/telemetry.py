@@ -158,11 +158,27 @@ def mapped_targets(affect: tuple, mapper) -> dict:
     }
 
 
-def bar_telemetry(result, pinned, mapped=None) -> dict:
+def lint_result(recent, meter) -> dict:
+    """Lint a small window of recent bars (so cross-bar rules — voice leading,
+    leap resolution — have context) and return the newest bar's status. The
+    same theory linter the offline renders must pass, run live."""
+    from musicgen import verify
+    if not recent:
+        return {"clean": True, "violations": []}
+    events = [ev for r in recent for ev in r.raw_events]
+    contexts = [r.context for r in recent]
+    latest = recent[-1].bar
+    hits = [{"rule": v.rule, "message": v.message}
+            for v in verify.lint(events, contexts, meter, stage="pre")
+            if v.bar in (latest, -1)]
+    return {"clean": not hits, "violations": hits}
+
+
+def bar_telemetry(result, pinned, mapped=None, lint=None) -> dict:
     """The per-bar message pushed to every client: the whole inspection payload
-    (chord/key, the params actually used, affect, the decision trace, the events
-    for a piano-roll), which Tier-2 params are pinned, and the mapper's would-be
-    targets (the follow/pin ghost)."""
+    (chord/key, the params actually used, affect, the decision trace, the post-
+    and raw events for a piano-roll, the live lint status), which Tier-2 params
+    are pinned, and the mapper's would-be targets (the follow/pin ghost)."""
     valence, energy, tension = result.affect
     return {
         "type": "bar",
@@ -174,6 +190,8 @@ def bar_telemetry(result, pinned, mapped=None) -> dict:
         "tempo_points": [list(tp) for tp in result.tempo_points],
         "trace": list(result.trace),
         "events": [event_dict(ev) for ev in result.events],
+        "raw_events": [event_dict(ev) for ev in result.raw_events],
+        "lint": lint or {"clean": True, "violations": []},
         "pinned": list(pinned),
     }
 
@@ -196,6 +214,7 @@ def schema() -> dict:
     brightness-ordered mode list. All read from the dataclasses at call time."""
     from musicgen.control.levers import OVERRIDABLE
     from musicgen.control.mapping import MappingTable
+    from musicgen.gen.conductor import EngineConfig
     from musicgen.ir import LAYER_NAMES, Meter, MusicalParams
     from musicgen.midi_io import GM_PATCHES
     from musicgen.theory.scales import BRIGHTNESS
@@ -265,4 +284,5 @@ def schema() -> dict:
         "modes": [{"name": m, "brightness": b}
                   for m, b in sorted(BRIGHTNESS.items(), key=lambda kv: kv[1])],
         "meter": {"numerator": Meter().numerator, "denominator": Meter().denominator},
+        "phrase_bars": EngineConfig().phrase_bars,
     }

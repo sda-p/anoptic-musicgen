@@ -111,6 +111,10 @@ class ConsoleConfig:
     # a mono envelope follower on master for the live player's meter channel;
     # off by default so offline renders add no node (determinism gauntlet)
     enable_meter: bool = False
+    # the sampler ("keys") voice: a loaded audio file replacing the synth bell.
+    # A structural change (rebuild). Empty path = the synthesized bell.
+    sample_path: str = ""
+    sample_root_midi: int = 72
 
 
 def _follower(signal, release: float):
@@ -148,6 +152,26 @@ class Console:
         # --- shared voice resources (sampler + wavetable banks, per console)
         self.wavetable_bank = patches.make_wavetable_bank()
         self.bell_sample = patches.make_bell_sample(int(graph.sample_rate))
+        # the "keys" melody voice: an uploaded sample (rebuild to change) or the
+        # synth bell. Uploaded stereo is mono-summed; a sample-rate mismatch is
+        # corrected so pitch is right regardless of the file's rate.
+        self.keys_sample = self.bell_sample
+        self.keys_root = patches.SAMPLE_ROOT_MIDI
+        self.keys_rate_scale = 1.0
+        if cfg.sample_path:
+            try:
+                import numpy as np
+                raw = sf.Buffer(cfg.sample_path)
+                if raw.num_channels > 1:
+                    mono = sf.Buffer(1, raw.num_frames)
+                    mono.data[0][:] = np.asarray(raw.data).mean(axis=0).astype(np.float32)
+                    self.keys_sample = mono
+                else:
+                    self.keys_sample = raw
+                self.keys_root = cfg.sample_root_midi
+                self.keys_rate_scale = (raw.sample_rate / graph.sample_rate) if raw.sample_rate else 1.0
+            except Exception:  # noqa: BLE001
+                pass  # unreadable/removed file: fall back to the synth bell
 
         # --- mod matrix: shared sources summed per destination; cutoff takes
         # its sum as a ratio, width/shimmer additively (clipped at use sites)
@@ -398,7 +422,8 @@ class Console:
             if patch == "keys":
                 node, total = patches.sampler_voice(
                     event.pitch, amp, dur_seconds, self.cutoff_out,
-                    self.bell_sample, int(self.graph.sample_rate))
+                    self.keys_sample, int(self.graph.sample_rate),
+                    root_midi=self.keys_root, rate_scale=self.keys_rate_scale)
             else:
                 node, total = patches.lead_voice(_hz(event.pitch), amp, dur_seconds,
                                                  self.cutoff_out, variant=patch or "soft")

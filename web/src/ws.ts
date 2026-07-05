@@ -6,6 +6,7 @@ import type { Affect, ServerMessage } from "./protocol";
 let socket: WebSocket | null = null;
 let reconnect: ReturnType<typeof setTimeout> | undefined;
 const TRACE_LIMIT = 250;
+const ROLL_BARS = 8;
 
 export function connect(): void {
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -38,6 +39,7 @@ function handle(msg: ServerMessage): void {
         consoleDefaults: Object.fromEntries(
           msg.console_ui.flatMap((g) => g.fields.map((f) => [f.name, f.default])),
         ),
+        phraseBars: msg.phrase_bars,
       });
       break;
     case "snapshot":
@@ -49,10 +51,17 @@ function handle(msg: ServerMessage): void {
         mapping: msg.mapping,
         slots: msg.slots,
         console: msg.console,
+        sample: msg.sample,
       });
       break;
     case "bar": {
-      const trace = [...mainStore.get().trace, ...msg.trace].slice(-TRACE_LIMIT);
+      const st = mainStore.get();
+      const trace = [...st.trace, ...msg.trace].slice(-TRACE_LIMIT);
+      // reset the roll when the engine restarts (bar number goes backwards)
+      const reset = st.roll.length > 0 && msg.bar <= st.roll[st.roll.length - 1].bar;
+      const roll = (reset ? [] : st.roll)
+        .concat({ bar: msg.bar, events: msg.events, rawEvents: msg.raw_events })
+        .slice(-ROLL_BARS);
       mainStore.set({
         context: msg.context,
         params: msg.params,
@@ -60,6 +69,8 @@ function handle(msg: ServerMessage): void {
         engineAffect: msg.affect,
         bar: msg.bar,
         trace,
+        roll,
+        lint: msg.lint,
       });
       break;
     }

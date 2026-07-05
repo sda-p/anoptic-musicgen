@@ -104,6 +104,36 @@ def test_console_tuner():
     assert "bogus_field" not in st.snapshot()["console"]
 
 
+def test_sampler_load_clear():
+    st = PlaygroundState()
+    assert st.snapshot()["sample"] == {"name": "", "root": 72}
+    st.set_sample("/tmp/foo/bell.wav", 60)         # rides the console-rebuild path
+    assert st.snapshot()["sample"] == {"name": "bell.wav", "root": 60}
+    assert st._console_config.sample_path == "/tmp/foo/bell.wav"
+    assert st._console_config.sample_root_midi == 60
+    st.clear_sample()
+    assert st.snapshot()["sample"] == {"name": "", "root": 72}
+    assert st._console_config.sample_path == ""
+
+
+def test_inspection_telemetry():
+    from musicgen.ir import Meter
+
+    s = telemetry.schema()
+    assert s["phrase_bars"] == 8
+
+    engine = MusicEngine(seed=3, config=EngineConfig(mapper=MappingTable()))
+    engine.set_affect(valence=0.2, energy=0.7, tension=0.5)
+    results = [engine.advance_bar() for _ in range(4)]
+    lint = telemetry.lint_result(results, Meter())
+    assert lint == {"clean": True, "violations": []}   # the engine's own output lints clean
+
+    msg = telemetry.bar_telemetry(results[-1], [], {}, lint)
+    assert msg["events"] and msg["raw_events"]           # both stages carried for the piano-roll
+    assert msg["lint"]["clean"] is True
+    json.dumps(msg)
+
+
 def test_override_mirror_and_coercion():
     st = PlaygroundState()
     st.set_override("tempo_bpm", 132)

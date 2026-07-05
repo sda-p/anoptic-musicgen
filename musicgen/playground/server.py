@@ -12,15 +12,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import tempfile
+from collections import deque
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from musicgen.playground import telemetry
 from musicgen.playground.state import PlaygroundState
 
 METER_HZ = 30.0
+_SAMPLE_DIR = Path(tempfile.gettempdir()) / "musicgen_playground_samples"
 # control messages that mutate server-mirrored state -> re-sync every client
 _SNAPSHOT_AFTER = {"set_override", "clear_override", "set_mapping", "reset_mapping",
                    "mapping_store", "mapping_recall", "set_console", "transport", "reseed"}
@@ -35,6 +38,7 @@ class Hub:
         self.clients: set[WebSocket] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.tel_queue: asyncio.Queue | None = None
+        self._recent: deque = deque(maxlen=6)  # window for live linting
 
     def on_bar(self, result) -> None:  # called on the player (generation) thread
         loop, queue = self.loop, self.tel_queue
@@ -44,7 +48,12 @@ class Hub:
         pinned = sorted(player.engine.overrides) if player is not None else []
         mapped = (telemetry.mapped_targets(result.affect, player.engine.config.mapper)
                   if player is not None else {})
-        msg = telemetry.bar_telemetry(result, pinned, mapped)
+        if self._recent and result.bar <= self._recent[-1].bar:
+            self._recent.clear()  # engine restarted (bar reset) — drop stale window
+        self._recent.append(result)
+        meter = player.engine.config.meter if player is not None else None
+        lint = telemetry.lint_result(list(self._recent), meter) if meter is not None else None
+        msg = telemetry.bar_telemetry(result, pinned, mapped, lint)
         loop.call_soon_threadsafe(queue.put_nowait, msg)
 
     async def broadcast(self, msg: dict) -> None:
@@ -108,6 +117,34 @@ async def api_schema() -> JSONResponse:
 @app.get("/api/state")
 async def api_state() -> JSONResponse:
     return JSONResponse(hub.state.snapshot())
+
+
+@app.post("/api/sample")
+async def api_sample(file: UploadFile = File(...), root: int = Form(72)) -> JSONResponse:
+    """Load an audio file into the sampler ("keys") voice. Validated by trying
+    to decode it (libsndfile) before it rebuilds the console."""
+    _SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
+    dest = _SAMPLE_DIR / Path(file.filename or "sample.wav").name
+    dest.write_bytes(await file.read())
+    try:
+        import signalflow as sf
+        buf = sf.Buffer(str(dest))
+        if buf.num_frames <= 0:
+            raise ValueError("empty sample")
+    except Exception as exc:  # noqa: BLE001
+        dest.unlink(missing_ok=True)
+        return JSONResponse({"ok": False, "error": f"unreadable audio: {exc}"}, status_code=400)
+    hub.state.set_sample(str(dest), int(root))
+    await hub.broadcast(hub.state.snapshot())
+    return JSONResponse({"ok": True, "name": dest.name,
+                         "frames": buf.num_frames, "sample_rate": buf.sample_rate})
+
+
+@app.post("/api/sample/clear")
+async def api_sample_clear() -> JSONResponse:
+    hub.state.clear_sample()
+    await hub.broadcast(hub.state.snapshot())
+    return JSONResponse({"ok": True})
 
 
 @app.get("/healthz")

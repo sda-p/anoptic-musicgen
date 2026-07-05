@@ -5,6 +5,8 @@ import { TelemetryHeader } from "./components/TelemetryHeader";
 import { TraceLog } from "./components/TraceLog";
 import { Meter } from "./components/Meter";
 import { Transport } from "./components/Transport";
+import { PhraseStrip } from "./components/PhraseStrip";
+import { LintBadge } from "./components/LintBadge";
 import { BottomPanel } from "./components/BottomPanel";
 
 export default function App() {
@@ -35,6 +37,8 @@ export default function App() {
         <section className="panel">
           <div className="panel-title">now playing</div>
           <TelemetryHeader />
+          <PhraseStrip />
+          <LintBadge />
           <Meter />
         </section>
 

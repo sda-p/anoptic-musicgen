@@ -10,6 +10,7 @@ thread). Rebuilding the engine on start re-applies the whole mirror, so edits
 from __future__ import annotations
 
 from dataclasses import fields, replace
+from pathlib import Path
 
 from musicgen.control.levers import validate_override
 from musicgen.control.mapping import MappingTable
@@ -65,6 +66,7 @@ class PlaygroundState:
         self.pinned: dict[str, object] = {}
         self.slots: dict[str, MappingTable] = {}  # A/B mapping snapshots
         self._console_config = None  # ConsoleConfig; lazy (pulls signalflow)
+        self._sample = {"name": "", "root": 72}  # loaded sampler file (name for display)
         self.player = None
 
     # ------------------------------------------------------------- lifecycle
@@ -184,6 +186,20 @@ class PlaygroundState:
         if self.player is not None:
             self.player.set_console(self._console_config)
 
+    def set_sample(self, path: str, root_midi: int) -> None:
+        """Load an uploaded audio file into the sampler ("keys") voice — a
+        structural change that rebuilds the console."""
+        self._console_config = replace(self._cc(), sample_path=str(path), sample_root_midi=int(root_midi))
+        self._sample = {"name": Path(path).name, "root": int(root_midi)}
+        if self.player is not None:
+            self.player.set_console(self._console_config)
+
+    def clear_sample(self) -> None:
+        self._console_config = replace(self._cc(), sample_path="", sample_root_midi=72)
+        self._sample = {"name": "", "root": 72}
+        if self.player is not None:
+            self.player.set_console(self._console_config)
+
     def reseed(self, seed) -> None:
         self.seed = int(seed)  # takes effect on the next start()
 
@@ -199,4 +215,5 @@ class PlaygroundState:
                         for f in fields(MappingTable)},
             "slots": sorted(self.slots),
             "console": self._console_values(),
+            "sample": dict(self._sample),
         }

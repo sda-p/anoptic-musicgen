@@ -79,6 +79,22 @@ export interface MappingGroup {
   fields: MappingFieldSpec[];
 }
 
+export interface EventDef {
+  start: number;
+  dur: number;
+  pitch: number;
+  velocity: number;
+  layer: string;
+  degree: number | null;
+  chord: string;
+  role: string;
+}
+
+export interface Lint {
+  clean: boolean;
+  violations: { rule: string; message: string }[];
+}
+
 export interface SchemaMsg {
   type: "schema";
   affect: Record<"valence" | "energy" | "tension", { min: number; max: number; default: number }>;
@@ -96,6 +112,7 @@ export interface SchemaMsg {
   patches_by_layer: Record<string, string[]>;
   modes: { name: string; brightness: number }[];
   meter: { numerator: number; denominator: number };
+  phrase_bars: number;
 }
 
 export interface SnapshotMsg {
@@ -107,6 +124,7 @@ export interface SnapshotMsg {
   mapping: Record<string, unknown>;
   slots: string[];
   console: Record<string, number>;
+  sample: { name: string; root: number };
 }
 
 export interface BarMsg {
@@ -118,7 +136,9 @@ export interface BarMsg {
   affect: Affect;
   tempo_points: [number, number][];
   trace: string[];
-  events: unknown[];
+  events: EventDef[];
+  raw_events: EventDef[];
+  lint: Lint;
   pinned: string[];
 }
 

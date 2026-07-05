@@ -105,11 +105,14 @@ def wavetable_pad_voice(freq: float, amp: float, dur: float, cutoff, bank) -> tu
     return sf.StereoPanner(filt * env * amp * 0.8, 0.0), dur + release
 
 
-def sampler_voice(pitch: int, amp: float, dur: float, cutoff, sample, sample_rate: int) -> tuple[object, float]:
-    """Sampled bell repitched from its root key: rate = 2^(dn/12), so higher
+def sampler_voice(pitch: int, amp: float, dur: float, cutoff, sample, sample_rate: int,
+                  root_midi: int = SAMPLE_ROOT_MIDI, rate_scale: float = 1.0) -> tuple[object, float]:
+    """Sampled voice repitched from its root key: rate = 2^(dn/12), so higher
     notes ring shorter and brighter — the honest resampling artifact. The
-    lever-driven filter still applies (sampled layers obey the same levers)."""
-    rate = 2.0 ** ((pitch - SAMPLE_ROOT_MIDI) / 12.0)
+    lever-driven filter still applies (sampled layers obey the same levers).
+    root_midi is the sample's native pitch; rate_scale corrects a sample-rate
+    mismatch (file_sr / graph_sr) — 1.0 for the graph-native bell."""
+    rate = 2.0 ** ((pitch - root_midi) / 12.0) * rate_scale
     natural = sample.num_frames / sample_rate / rate
     player = sf.BufferPlayer(sample, rate=rate, loop=False)
     total = min(natural, dur + 1.2)

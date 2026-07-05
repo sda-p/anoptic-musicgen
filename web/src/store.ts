@@ -1,5 +1,13 @@
 import { useSyncExternalStore } from "react";
-import type { Affect, BarContext, MappingGroup, ParamGroup, Params, SchemaMsg } from "./protocol";
+import type {
+  Affect, BarContext, EventDef, Lint, MappingGroup, ParamGroup, Params, SchemaMsg,
+} from "./protocol";
+
+export interface RollBar {
+  bar: number;
+  events: EventDef[];
+  rawEvents: EventDef[];
+}
 
 // A minimal external store: replace-and-notify. Two instances keep the 30 fps
 // meter feed off the per-bar telemetry store, so meter frames never re-render
@@ -41,6 +49,10 @@ export interface MainState {
   console: Record<string, number>; // applied ConsoleConfig numeric values
   consoleUi: MappingGroup[];
   consoleDefaults: Record<string, unknown>;
+  sample: { name: string; root: number }; // loaded sampler file (name "" = synth bell)
+  roll: RollBar[]; // rolling window of recent bars' events (piano-roll)
+  lint: Lint; // live theory-lint status of the current bar
+  phraseBars: number;
   bar: number | null;
   trace: string[];
   schema: SchemaMsg | null;
@@ -66,6 +78,10 @@ export const mainStore = createStore<MainState>({
   console: {},
   consoleUi: [],
   consoleDefaults: {},
+  sample: { name: "", root: 72 },
+  roll: [],
+  lint: { clean: true, violations: [] },
+  phraseBars: 8,
   bar: null,
   trace: [],
   schema: null,
