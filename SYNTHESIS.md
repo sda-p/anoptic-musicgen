@@ -200,6 +200,24 @@ stochastic primitive takes an explicit seed** — no hidden global entropy
    looped BufferPlayer (same semantics, initialized phase). For the C
    library: run analyzers on all DSP state, and make "render twice on a
    deliberately churned heap, diff bit-exactly" a CI gate.
+9. **A live audio graph can't be restructured from another thread.** Letting
+   signalflow run the audio thread (its device output) while the engine thread
+   mutated the graph — voices attaching/detaching to strip buses every note,
+   sweep/duck envelopes added and removed — segfaulted under sustained live
+   control. Two cores told the whole story: one in `Bus::process` iterating an
+   input vector, one in a `shared_ptr` release inside `render_subgraph` — the
+   audio thread walking a bus's inputs while the control thread reallocated
+   that vector or dropped a node's last reference. The offline renderer never
+   hit it because it is single-threaded (one thread renders AND mutates,
+   between blocks). The realtime player now matches it: it drives the render
+   loop itself and writes cooked blocks to the device (via sounddevice), so
+   signalflow's audio thread is never started and render/mutation cannot
+   overlap. For the C library: the audio thread OWNS the graph — structural
+   changes (voice alloc/free, send re-routing) are enqueued and applied by
+   that thread at block boundaries, never by mutating live nodes or refcounts
+   from elsewhere. This is finding 4 (voices are preset blocks) at graph
+   scale, and it argues for a pre-allocated voice pool where "allocate" is a
+   state flip, not a graph edit.
 
 ## Roadmap (authored-production techniques not yet exercised)
 

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import heapq
 import threading
-import time
 from pathlib import Path
 from typing import Callable
 
@@ -125,7 +124,16 @@ def render_offline(
 
 
 class RealtimeSynthPlayer:
-    """Real-time twin of live.LivePlayer, driving the console directly."""
+    """Real-time twin of live.LivePlayer, driving the console directly.
+
+    Renders single-threaded: this player owns the render loop and pushes blocks
+    to the device itself (sounddevice), rather than letting signalflow spawn an
+    audio thread. That is deliberate — the console graph is mutated constantly
+    (voice attach/detach, sweep/duck envelopes), and mutating a live graph from
+    a second thread while signalflow's audio thread renders it races on node
+    refcounts and bus input vectors, and segfaults. One thread, render and
+    mutation interleaved, is exactly the (crash-free) offline contract.
+    See SYNTHESIS.md finding 9."""
 
     def __init__(
         self,
@@ -148,6 +156,7 @@ class RealtimeSynthPlayer:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.bars_played = 0
+        self.console = None  # set once run() builds it; None while stopped
 
     def set_affect(self, **kwargs) -> None:
         with self._lock:
@@ -160,6 +169,13 @@ class RealtimeSynthPlayer:
     def clear_override(self, name: str) -> None:
         with self._lock:
             self._commands.append(("clear", name))
+
+    def set_mapping(self, table) -> None:
+        """Hot-swap the whole (frozen) MappingTable; applied at the next bar
+        edge. The engine re-reads config.mapper each bar, so the swap is atomic
+        and deterministic — the M12 live-heuristics path."""
+        with self._lock:
+            self._commands.append(("mapping", table))
 
     def request_key(self, tonic, *, urgent: bool = False) -> None:
         with self._lock:
@@ -184,40 +200,63 @@ class RealtimeSynthPlayer:
                 self.engine.set_override(command[1], command[2])
             elif command[0] == "clear":
                 self.engine.clear_override(command[1])
+            elif command[0] == "mapping":
+                self.engine.config.mapper = command[1]
             elif command[0] == "key":
                 self.engine.request_key(command[1], urgent=command[2])
 
     def run(self) -> None:
+        import numpy as np
         import signalflow as sf
+        try:
+            import sounddevice as sd
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError("realtime playback needs sounddevice "
+                               "(pip install -e '.[playground]')") from exc
 
-        graph = sf.AudioGraph(start=True)  # system audio output
+        try:
+            sr = int(sd.query_devices(kind="output")["default_samplerate"])
+        except Exception:  # noqa: BLE001
+            sr = 48000
+        block = 512  # ~11 ms at 48 kHz: control/onset granularity, ample render headroom
+        graph = sf.AudioGraph(output_device=sf.AudioOut_Dummy(2, sr, block), start=False)
+        stream = sd.OutputStream(samplerate=sr, channels=2, dtype="float32", blocksize=block)
         try:
             console = Console(graph, self.config or ConsoleConfig())
+            self.console = console
             bar_quarters = self.engine.config.meter.bar_quarters
-            clock = BeatClock(time.monotonic() + self.prime_seconds)
-            heap: list[tuple[float, int, int, object]] = []  # (time, kind, seq, payload)
+            clock = BeatClock(0.0)  # beat -> second map only; `pos` is the frame clock
+            lead_frames = int(self.lead_seconds * sr)
+            heap: list[tuple[int, int, int, object]] = []    # (frame, kind, seq, payload)
+            active: list[tuple[int, int, str, object]] = []  # (end_frame, seq, layer, node)
             seq = 0
             next_bar = 0
-            while not self._stop.is_set():
-                now = time.monotonic()
-                while (
-                    clock.time_at(next_bar * bar_quarters) < now + self.lead_seconds
-                    and (self.max_bars is None or next_bar < self.max_bars)
-                    and not self._stop.is_set()
-                ):
+            pos = 0
+
+            def generate_ahead() -> None:
+                nonlocal seq, next_bar
+                while (int(clock.time_at(next_bar * bar_quarters) * sr) < pos + lead_frames
+                       and (self.max_bars is None or next_bar < self.max_bars)):
                     self._apply_pending()
                     result = self.engine.advance_bar()
                     for beat, bpm in result.tempo_points:
                         clock.add_tempo_point(beat, bpm)
-                    heapq.heappush(heap, (clock.time_at(next_bar * bar_quarters), _KIND_PARAMS, seq, result))
+                    heapq.heappush(heap, (int(clock.time_at(next_bar * bar_quarters) * sr),
+                                          _KIND_PARAMS, seq, result))
                     seq += 1
                     for ev in result.events:
                         on = clock.time_at(ev.start)
-                        heapq.heappush(heap, (on, _KIND_NOTE, seq, (ev, clock.time_at(ev.end) - on)))
+                        heapq.heappush(heap, (int(on * sr), _KIND_NOTE, seq,
+                                              (ev, clock.time_at(ev.end) - on)))
                         seq += 1
                     next_bar += 1
 
-                while heap and heap[0][0] <= now + 0.002:
+            stream.start()
+            while not self._stop.is_set():
+                self._apply_pending()  # ~11 ms cadence: live control lands within a block
+                generate_ahead()
+
+                while heap and heap[0][0] <= pos:
                     _, kind, _, payload = heapq.heappop(heap)
                     if kind == _KIND_PARAMS:
                         console.apply_params(payload.params, payload.affect, payload.params.tempo_bpm,
@@ -225,18 +264,31 @@ class RealtimeSynthPlayer:
                         self.bars_played += 1
                         if self.on_bar is not None:
                             self.on_bar(payload)
-                    elif kind == _KIND_NOTE:
+                    else:
                         ev, dur_seconds = payload
                         layer, node, total = console.note_on(ev, dur_seconds)
-                        heapq.heappush(heap, (time.monotonic() + total, _KIND_REMOVE, seq, (layer, node)))
+                        heapq.heappush(active, (pos + int(total * sr), seq, layer, node))
                         seq += 1
-                    else:
-                        console.remove(*payload)
+                while active and active[0][0] <= pos:
+                    _, _, layer, node = heapq.heappop(active)
+                    console.remove(layer, node)
 
-                if self.max_bars is not None and next_bar >= self.max_bars and not heap:
+                # render one block and hand cooked samples to the device; the
+                # blocking write paces us to realtime. Nothing else ever touches
+                # the graph, so there is no mutation/render race.
+                graph.render(block)
+                samples = np.asarray(console.master.output_buffer)
+                stream.write(np.ascontiguousarray(samples.T, dtype=np.float32))
+                pos += block
+
+                if (self.max_bars is not None and next_bar >= self.max_bars
+                        and not heap and not active):
                     break
-                wait = min(heap[0][0] - time.monotonic(), 0.02) if heap else 0.02
-                if wait > 0:
-                    time.sleep(min(wait, 0.02))
         finally:
+            self.console = None
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:  # noqa: BLE001
+                pass
             graph.destroy()

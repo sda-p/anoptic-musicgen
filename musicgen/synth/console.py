@@ -108,6 +108,9 @@ class ConsoleConfig:
     # glide — same target, musically shaped arrival
     sweep_trigger_ratio: float = 1.6
     sweep_depth: float = 0.9
+    # a mono envelope follower on master for the live player's meter channel;
+    # off by default so offline renders add no node (determinism gauntlet)
+    enable_meter: bool = False
 
 
 def _follower(signal, release: float):
@@ -260,9 +263,25 @@ class Console:
         loud = sf.Tanh(glued * cfg.master_makeup)
         limited = self._limiter(sf.DCFilter(loud))
         self.master = sf.Clip(limited, -0.95, 0.95)
+        # optional meter: an instant-attack follower on a mono sum of master,
+        # polled via get_value() from the live player's ~30 fps meter channel
+        self._meter = None
+        if cfg.enable_meter:
+            self._meter = _follower(sf.ChannelMixer(1, self.master), 0.999)
+            graph.add_node(self._meter)
         graph.play(self.master)
 
     # --- processor builders ----------------------------------------------------
+
+    def level(self) -> float:
+        """Current master output level (~0..1) for the live meter; 0.0 when
+        metering is disabled (offline renders build no follower node)."""
+        if self._meter is None:
+            return 0.0
+        try:
+            return float(self._meter.get_value())
+        except Exception:  # noqa: BLE001
+            return 0.0
 
     def _chorus(self, signal):
         """Stereo bus chorus: two taps modulated at decorrelated rates."""
