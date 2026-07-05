@@ -7,13 +7,15 @@ import { api } from "../ws";
 export function TensionFader() {
   const s = useMain();
   const [t, setT] = useState(s.snapshotAffect.tension);
-  const touched = useRef(false);
   const dragging = useRef(false);
   const raf = useRef(0);
   const pending = useRef(0);
 
+  // follow the server mirror (initial + external changes), never mid-drag
   useEffect(() => {
-    if (!touched.current) setT(s.snapshotAffect.tension);
+    if (dragging.current) return;
+    setT((prev) =>
+      Math.abs(prev - s.snapshotAffect.tension) > 1e-6 ? s.snapshotAffect.tension : prev);
   }, [s.snapshotAffect]);
 
   const flush = () => {
@@ -30,7 +32,6 @@ export function TensionFader() {
   };
   const down = (e: React.PointerEvent<HTMLDivElement>) => {
     dragging.current = true;
-    touched.current = true;
     e.currentTarget.setPointerCapture(e.pointerId);
     const v = read(e);
     setT(v);

@@ -9,13 +9,18 @@ import { api } from "../ws";
 export function AffectPad() {
   const s = useMain();
   const [target, setTarget] = useState({ v: s.snapshotAffect.valence, e: s.snapshotAffect.energy });
-  const touched = useRef(false);
   const dragging = useRef(false);
   const raf = useRef(0);
   const pending = useRef<{ valence: number; energy: number }>({ valence: 0, energy: 0 });
 
+  // follow the server mirror (initial seed + external changes like a preset
+  // load), but never yank the handle out from under an in-progress drag
   useEffect(() => {
-    if (!touched.current) setTarget({ v: s.snapshotAffect.valence, e: s.snapshotAffect.energy });
+    if (dragging.current) return;
+    const a = s.snapshotAffect;
+    setTarget((prev) =>
+      Math.abs(prev.v - a.valence) > 1e-6 || Math.abs(prev.e - a.energy) > 1e-6
+        ? { v: a.valence, e: a.energy } : prev);
   }, [s.snapshotAffect]);
 
   const flush = () => {
@@ -34,7 +39,6 @@ export function AffectPad() {
   };
   const down = (e: React.PointerEvent<HTMLDivElement>) => {
     dragging.current = true;
-    touched.current = true;
     e.currentTarget.setPointerCapture(e.pointerId);
     const { v, en } = read(e);
     setTarget({ v, e: en });

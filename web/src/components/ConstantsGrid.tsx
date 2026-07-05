@@ -68,8 +68,8 @@ function NumberField(props: { value: number; step: number; onCommit: (v: number)
   }, [props.value]);
   const commit = () => {
     const n = Number(text);
-    if (Number.isFinite(n)) props.onCommit(n);
-    else setText(String(props.value));
+    if (text.trim() !== "" && Number.isFinite(n)) props.onCommit(n);
+    else setText(String(props.value)); // revert a blank / non-numeric entry (Number("")===0)
   };
   return (
     <input className="mfield mono" type="number" step={props.step} value={text}

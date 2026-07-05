@@ -1,4 +1,4 @@
-import { useMain } from "./store";
+import { mainStore, useMain } from "./store";
 import { AffectPad } from "./components/AffectPad";
 import { TensionFader } from "./components/TensionFader";
 import { TelemetryHeader } from "./components/TelemetryHeader";
@@ -50,7 +50,12 @@ export default function App() {
 
       <BottomPanel />
 
-      {s.error && <div className="error-bar">error: {s.error}</div>}
+      {s.error && (
+        <div className="error-bar">
+          <span>error: {s.error}</span>
+          <button className="error-dismiss" title="dismiss" onClick={() => mainStore.set({ error: null })}>×</button>
+        </div>
+      )}
     </div>
   );
 }

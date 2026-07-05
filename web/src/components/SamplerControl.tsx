@@ -36,6 +36,16 @@ export function SamplerControl() {
     }
   };
 
+  const clear = async () => {
+    setErr("");
+    try {
+      const res = await fetch("/api/sample/clear", { method: "POST" });
+      if (!res.ok) setErr(`clear failed (${res.status})`);
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+
   return (
     <div className="sampler-ctl">
       <div className="instruments-head">
@@ -45,7 +55,7 @@ export function SamplerControl() {
       <div className="sampler-row">
         <span className="sampler-current mono">{loaded || "synth bell (default)"}</span>
         {loaded && (
-          <button className="btn-sm" onClick={() => void fetch("/api/sample/clear", { method: "POST" })}>
+          <button className="btn-sm" onClick={clear}>
             clear
           </button>
         )}
@@ -56,7 +66,7 @@ export function SamplerControl() {
         <label className="sampler-root">
           root
           <input className="mfield mono" type="number" min={0} max={127} value={root}
-                 onChange={(e) => setRoot(Number(e.target.value))} />
+                 onChange={(e) => setRoot(Math.max(0, Math.min(127, Math.round(Number(e.target.value) || 0))))} />
         </label>
         <button className="btn-sm btn-apply" disabled={busy} onClick={upload}>
           {busy ? "loading…" : "load"}

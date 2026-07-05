@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMain } from "../store";
 import { api } from "../ws";
 
@@ -7,10 +7,13 @@ import { api } from "../ws";
 export function Transport() {
   const { running, seed } = useMain();
   const [seedInput, setSeedInput] = useState(String(seed));
+  // re-sync when the seed changes server-side (e.g. a preset load)
+  useEffect(() => { setSeedInput(String(seed)); }, [seed]);
 
   const commitSeed = () => {
     const n = Number(seedInput);
-    if (Number.isFinite(n)) api.reseed(n);
+    if (seedInput.trim() !== "" && Number.isFinite(n)) api.reseed(Math.round(n));
+    else setSeedInput(String(seed)); // revert a blank / non-numeric entry
   };
 
   return (

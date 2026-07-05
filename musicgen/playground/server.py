@@ -1,7 +1,8 @@
 """The FastAPI service: one WebSocket carrying bidirectional control + per-bar
-telemetry + a ~30 fps meter, plus REST for the schema/state snapshots. A single
-session (one engine + player) is plenty for a local dev tool; multiple browser
-tabs just share it and stay in sync via broadcast snapshots.
+telemetry + a ~30 fps meter, plus REST for the schema, sample upload, session
+presets, and offline WAV/MIDI export. A single session (one engine + player) is
+plenty for a local dev tool; multiple browser tabs just share it and stay in
+sync via broadcast snapshots.
 
 Threading: the player runs the engine on its own daemon thread and calls
 on_bar there; we marshal each telemetry dict onto the asyncio loop with
@@ -185,7 +186,10 @@ async def api_preset_load(payload: dict = Body(...)) -> JSONResponse:
     path = _PRESET_DIR / f"{name}.json"
     if not path.is_file():
         return JSONResponse({"ok": False, "error": f"no preset {name!r}"}, status_code=404)
-    hub.state.import_session(json.loads(path.read_text()))
+    try:
+        hub.state.import_session(json.loads(path.read_text()))
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": f"could not load preset: {exc}"}, status_code=400)
     await hub.broadcast(hub.state.snapshot())
     return JSONResponse({"ok": True})
 
@@ -201,18 +205,26 @@ async def api_preset_delete(payload: dict = Body(...)) -> JSONResponse:
 async def api_export(kind: str = "wav", bars: int = 32):
     """Offline bounce of the current config to WAV or MIDI (download). Requires
     a stopped transport — the live player already owns the one audio graph."""
+    # both guards below are checked synchronously (no await between them and the
+    # flag set), so a WS `transport start` can't slip a second graph in
     if hub.state.running:
         return JSONResponse({"ok": False, "error": "stop playback before exporting"},
+                            status_code=409)
+    if hub.state.exporting:
+        return JSONResponse({"ok": False, "error": "an export is already in progress"},
                             status_code=409)
     kind = "midi" if kind == "midi" else "wav"
     bars = max(1, min(int(bars), 512))
     _EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     ext = "mid" if kind == "midi" else "wav"
     dest = _EXPORT_DIR / f"musicgen-seed{hub.state.seed}-{bars}bars.{ext}"
+    hub.state.exporting = True  # blocks a concurrent transport start (one graph at a time)
     try:
         await asyncio.to_thread(hub.state.render_export, kind, bars, str(dest))
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    finally:
+        hub.state.exporting = False
     media = "audio/midi" if kind == "midi" else "audio/wav"
     return FileResponse(str(dest), media_type=media, filename=dest.name)
 

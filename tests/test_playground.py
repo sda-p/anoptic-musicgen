@@ -102,6 +102,8 @@ def test_console_tuner():
     assert snap["console"]["fdn_t60"] == 3.5 and snap["console"]["shimmer_max"] == 0.6
     st.set_console_fields({"bogus_field": 1.0})   # unknown field ignored, no crash
     assert "bogus_field" not in st.snapshot()["console"]
+    st.set_console_fields({"sample_path": 1.0})   # non-numeric field never float-coerced
+    assert st._console_config.sample_path == ""
 
 
 def test_sampler_load_clear():
@@ -161,6 +163,19 @@ def test_seek_sets_start_bar():
     assert st.snapshot()["start_bar"] == 12
     st.seek(-4)
     assert st.snapshot()["start_bar"] == 0                     # clamped non-negative
+    st.seek(10_000_000)
+    assert st.snapshot()["start_bar"] == 4096                  # clamped to the warm-up ceiling
+
+
+def test_set_automation_is_atomic_on_bad_points():
+    st = PlaygroundState()
+    st.set_automation(enabled=False, loop_bars=8)
+    before = [dict(p) for p in st.automation["points"]]
+    with pytest.raises((KeyError, TypeError, ValueError)):
+        st.set_automation(enabled=True, loop_bars=16, points=[{"bar": 0}])  # missing v/e/t
+    # the bad points must abort the whole update — enabled/loop_bars unchanged
+    assert st.automation["enabled"] is False and st.automation["loop_bars"] == 8
+    assert st.automation["points"] == before
 
 
 def test_session_export_import_roundtrip():

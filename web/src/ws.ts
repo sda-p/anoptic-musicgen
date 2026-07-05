@@ -12,9 +12,16 @@ export function connect(): void {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   socket = new WebSocket(`${proto}://${location.host}/ws`);
   socket.onopen = () => mainStore.set({ connected: true, error: null });
-  socket.onmessage = (ev) => handle(JSON.parse(ev.data) as ServerMessage);
+  socket.onmessage = (ev) => {
+    try {
+      handle(JSON.parse(ev.data) as ServerMessage);
+    } catch (err) {
+      mainStore.set({ error: `bad message from server: ${String(err)}` });
+    }
+  };
   socket.onclose = () => {
-    mainStore.set({ connected: false });
+    // drop `running` too, so a disconnect doesn't leave the last frame looking live
+    mainStore.set({ connected: false, running: false });
     if (!reconnect) {
       reconnect = setTimeout(() => {
         reconnect = undefined;
@@ -58,12 +65,13 @@ function handle(msg: ServerMessage): void {
       break;
     case "bar": {
       const st = mainStore.get();
-      const trace = [...st.trace, ...msg.trace].slice(-TRACE_LIMIT);
-      // reset the roll when the engine restarts (bar number goes backwards)
+      // reset both roll AND trace when the engine restarts (bar goes backwards)
       const reset = st.roll.length > 0 && msg.bar <= st.roll[st.roll.length - 1].bar;
+      const rollCap = Math.max(1, st.phraseBars || ROLL_BARS);
+      const trace = [...(reset ? [] : st.trace), ...msg.trace].slice(-TRACE_LIMIT);
       const roll = (reset ? [] : st.roll)
         .concat({ bar: msg.bar, events: msg.events, rawEvents: msg.raw_events })
-        .slice(-ROLL_BARS);
+        .slice(-rollCap);
       mainStore.set({
         context: msg.context,
         params: msg.params,
@@ -89,8 +97,9 @@ function send(msg: object): void {
   if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg));
 }
 
-// Control surface. Phase 3+ extends this with setOverride / clearOverride /
-// setMapping / requestKey; the skeleton needs only transport, affect, seed.
+// Control surface: every WS control message the server accepts. The mutating
+// ones are optimistic (write the store, then send; the server snapshot
+// reconfirms). Presets + export are REST helpers below.
 export const api = {
   start: () => send({ type: "transport", action: "start" }),
   stop: () => send({ type: "transport", action: "stop" }),
@@ -117,10 +126,12 @@ export const api = {
   recallMapping: (slot: string) => send({ type: "mapping_recall", slot }),
   // structural console change: rebuilds the audio graph (a brief gap)
   setConsole: (fields: Record<string, unknown>) => send({ type: "set_console", fields }),
-  // drawable affect automation (optimistic; the server echoes a snapshot)
-  setAutomation: (patch: Partial<AutomationTrack>) => {
+  // drawable affect automation (optimistic; the server echoes a snapshot).
+  // emit=false updates the store only — a drag previews locally at rAF cadence
+  // and sends once on release, instead of flooding the socket per pointermove.
+  setAutomation: (patch: Partial<AutomationTrack>, emit = true) => {
     mainStore.set({ automation: { ...mainStore.get().automation, ...patch } });
-    send({ type: "set_automation", ...patch });
+    if (emit) send({ type: "set_automation", ...patch });
   },
   // jump-to-bar: restarts the running engine warmed to this deterministic bar
   seek: (bar: number) => send({ type: "seek", bar }),
@@ -130,6 +141,7 @@ export const api = {
 // refreshed preset list where relevant so the sessions tab can re-render.
 export async function listPresets(): Promise<string[]> {
   const r = await fetch("/api/presets");
+  if (!r.ok) throw new Error(`list failed (${r.status})`);
   return (await r.json()).presets ?? [];
 }
 
@@ -156,7 +168,9 @@ export async function deletePreset(name: string): Promise<string[]> {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
   });
-  return (await r.json()).presets ?? [];
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error ?? `delete failed (${r.status})`);
+  return j.presets ?? [];
 }
 
 // Fetch the export as a blob so a 409 (playing) / 500 surfaces as a message

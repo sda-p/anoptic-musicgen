@@ -142,7 +142,6 @@ class RealtimeSynthPlayer:
         *,
         config: ConsoleConfig | None = None,
         lead_seconds: float = 2.5,
-        prime_seconds: float = 0.3,
         on_bar: Callable | None = None,
         max_bars: int | None = None,
         start_bar: int = 0,
@@ -151,7 +150,6 @@ class RealtimeSynthPlayer:
         self.engine = engine
         self.config = config
         self.lead_seconds = lead_seconds
-        self.prime_seconds = prime_seconds
         self.on_bar = on_bar
         self.max_bars = max_bars
         self.start_bar = int(start_bar)  # jump-to-bar: warm the engine here before playing

@@ -4,8 +4,6 @@ import { api } from "../ws";
 // Per-layer patch selection — the `instruments` override (deferred from the
 // Phase 3 grid). Follow => the mapper swaps patches by energy tier; pin => pick
 // them by hand. Swaps land on the phrase and take effect at the next note-on.
-const LAYERS = ["pad", "bass", "melody", "arp"]; // perc has no instrument tier
-
 export function InstrumentsPicker() {
   const s = useMain();
   const pinned = "instruments" in s.pinned;
@@ -14,9 +12,11 @@ export function InstrumentsPicker() {
     : (s.params?.instruments ?? []);
   const currentMap = new Map(current);
   const patchesByLayer = s.schema?.patches_by_layer ?? {};
+  // layers that actually carry patch tiers, in canonical order (perc has none)
+  const layers = (s.schema?.layers ?? []).filter((l) => (patchesByLayer[l]?.length ?? 0) > 0);
 
   const setPatch = (layer: string, patch: string) => {
-    const next = LAYERS.map((l) =>
+    const next = layers.map((l) =>
       [l, l === layer ? patch : (currentMap.get(l) ?? patchesByLayer[l]?.[0] ?? "")] as [string, string],
     );
     api.setOverride("instruments", next);
@@ -33,7 +33,7 @@ export function InstrumentsPicker() {
         </button>
       </div>
       <div className="instruments-grid">
-        {LAYERS.map((layer) => (
+        {layers.map((layer) => (
           <label className="instrument-row" key={layer}>
             <span className="instrument-layer">{layer}</span>
             <select className="enum-select" disabled={!pinned}

@@ -47,6 +47,8 @@ export function AutomationTimeline() {
   const { automation, running, bar } = useMain();
   const svgRef = useRef<SVGSVGElement | null>(null);
   const drag = useRef<{ index: number; lane: number } | null>(null);
+  const raf = useRef(0);
+  const pending = useRef<AutomationPoint[] | null>(null);
 
   const points = automation.points;
   const loop = automation.loop_bars;
@@ -69,9 +71,13 @@ export function AutomationTimeline() {
     return { x: ((e.clientX - r.left) / r.width) * VBW, y: ((e.clientY - r.top) / r.height) * VBH };
   };
 
-  const commit = (next: AutomationPoint[]) => api.setAutomation({ points: next });
-  // live (un-sent) update during a drag, for smooth feedback
-  const preview = (next: AutomationPoint[]) => api.setAutomation({ points: next });
+  // discrete edits (add / remove) send straight to the server. A drag previews
+  // to the store at rAF cadence (emit=false → no socket traffic) and sends once
+  // on release — the one-send-per-gesture shape Slider / AffectPad use.
+  const flush = () => {
+    raf.current = 0;
+    if (pending.current) api.setAutomation({ points: pending.current }, false);
+  };
 
   const addPoint = (lane: number, e: React.MouseEvent) => {
     const { x, y } = toVB(e);
@@ -84,7 +90,7 @@ export function AutomationTimeline() {
       tension: valueAt(points, b, "tension"),
     };
     np[LANES[lane].key] = valForY(lane, y); // the lane you clicked lands under the cursor
-    commit([...points, np].sort((a, c) => a.bar - c.bar));
+    api.setAutomation({ points: [...points, np].sort((a, c) => a.bar - c.bar) });
   };
 
   const onDotDown = (index: number, lane: number, e: React.PointerEvent) => {
@@ -96,20 +102,23 @@ export function AutomationTimeline() {
     if (!drag.current) return;
     const { index, lane } = drag.current;
     const { x, y } = toVB(e);
-    const next = points.map((p, i) =>
+    pending.current = points.map((p, i) =>
       i === index ? { ...p, bar: barForX(x), [LANES[lane].key]: valForY(lane, y) } : p,
     );
-    preview(next);
+    if (!raf.current) raf.current = requestAnimationFrame(flush);
   };
   const onUp = (e: React.PointerEvent) => {
     if (!drag.current) return;
     (e.target as Element).releasePointerCapture?.(e.pointerId);
     drag.current = null;
-    commit([...points].sort((a, c) => a.bar - c.bar));
+    if (raf.current) { cancelAnimationFrame(raf.current); raf.current = 0; }
+    const final = pending.current ?? points;
+    pending.current = null;
+    api.setAutomation({ points: [...final].sort((a, c) => a.bar - c.bar) }); // commit once
   };
   const removePoint = (index: number) => {
     if (points.length <= 1) return; // keep at least one keyframe
-    commit(points.filter((_, i) => i !== index));
+    api.setAutomation({ points: points.filter((_, i) => i !== index) });
   };
 
   const sorted = [...points].sort((a, b) => a.bar - b.bar);
@@ -170,7 +179,7 @@ export function AutomationTimeline() {
                 <line className="lane-zero" x1={PAD_L} y1={zeroY} x2={PAD_L + PLOT_W} y2={zeroY} />
               )}
               <text className="lane-label" x={4} y={top + 12}>{L.label}</text>
-              {loop > 0 && loop <= span && (
+              {loop > 0 && (
                 <line className="loop-mark" x1={xForBar(loop)} y1={top} x2={xForBar(loop)} y2={top + LANE_H} />
               )}
               {path && <path className="lane-curve" style={{ stroke: L.color }} d={path} />}

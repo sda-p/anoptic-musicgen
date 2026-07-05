@@ -220,6 +220,7 @@ def schema() -> dict:
     from musicgen.theory.scales import BRIGHTNESS
 
     mt = MappingTable()
+    ec = EngineConfig()  # affect defaults + phrase length read from the engine, not hardcoded
     patches_by_layer: dict[str, list[str]] = {}
     for layer, patch in GM_PATCHES:
         patches_by_layer.setdefault(layer, []).append(patch)
@@ -265,9 +266,9 @@ def schema() -> dict:
     return {
         "type": "schema",
         "affect": {
-            "valence": {"min": -1.0, "max": 1.0, "default": 0.3},
-            "energy": {"min": 0.0, "max": 1.0, "default": 0.5},
-            "tension": {"min": 0.0, "max": 1.0, "default": 0.45},
+            "valence": {"min": -1.0, "max": 1.0, "default": ec.valence},
+            "energy": {"min": 0.0, "max": 1.0, "default": ec.energy},
+            "tension": {"min": 0.0, "max": 1.0, "default": ec.tension},
         },
         "overridable": sorted(OVERRIDABLE),
         "params": _dataclass_fields(MusicalParams),
@@ -284,5 +285,5 @@ def schema() -> dict:
         "modes": [{"name": m, "brightness": b}
                   for m, b in sorted(BRIGHTNESS.items(), key=lambda kv: kv[1])],
         "meter": {"numerator": Meter().numerator, "denominator": Meter().denominator},
-        "phrase_bars": EngineConfig().phrase_bars,
+        "phrase_bars": ec.phrase_bars,
     }

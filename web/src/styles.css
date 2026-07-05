@@ -39,6 +39,7 @@ body {
 .topbar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 16px;
   padding: 10px 18px;
   border-bottom: 1px solid var(--line);
@@ -65,6 +66,12 @@ body {
   padding: 12px;
   flex: 1;
   min-height: 0;
+}
+
+/* narrow / portrait: stack the three panels and let the row scroll rather than
+   crushing the center panel to nothing */
+@media (max-width: 900px) {
+  .grid { grid-template-columns: 1fr; overflow-y: auto; }
 }
 
 .panel {
@@ -339,12 +346,25 @@ body {
 
 /* ---- error ---------------------------------------------------------------- */
 .error-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   padding: 8px 18px;
   background: color-mix(in srgb, var(--warn) 18%, var(--bg));
   color: var(--warn);
   font-size: 12px;
   font-family: var(--mono);
   border-top: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+}
+.error-dismiss {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--warn);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
 }
 
 /* ---- parameters: follow / pin grid --------------------------------------- */
@@ -973,18 +993,24 @@ body {
   font-style: italic;
 }
 .preset-name { flex: 1; font-size: 12px; }
-.btn-small {
-  font: inherit;
-  font-size: 11px;
-  padding: 3px 9px;
-  border-radius: 6px;
-  cursor: pointer;
-  background: var(--panel-2);
-  color: var(--fg);
-  border: 1px solid var(--line);
-}
-.btn-small:hover { border-color: var(--dim); }
 .btn-danger { color: var(--warn); }
+
+.crash {
+  max-width: 640px;
+  margin: 64px auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-items: flex-start;
+}
+.crash h1 { font-size: 16px; color: var(--warn); margin: 0; }
+.crash pre {
+  white-space: pre-wrap;
+  color: var(--dim);
+  font-size: 12px;
+  margin: 0;
+}
 
 .toggle {
   display: inline-flex;

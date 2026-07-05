@@ -30,7 +30,11 @@ export function SessionsTab() {
     try { await loadPreset(n); flash(`loaded "${n}"`); }
     catch (e) { flash(String((e as Error).message)); }
   };
-  const onDelete = async (n: string) => { setPresets(await deletePreset(n)); };
+  const onDelete = async (n: string) => {
+    if (!window.confirm(`delete preset "${n}"?`)) return;
+    try { setPresets(await deletePreset(n)); flash(`deleted "${n}"`); }
+    catch (e) { flash(String((e as Error).message)); }
+  };
 
   const onExport = async (kind: "wav" | "midi") => {
     setBusy(true);
@@ -64,8 +68,8 @@ export function SessionsTab() {
             {presets.map((n) => (
               <li key={n}>
                 <span className="preset-name mono">{n}</span>
-                <button className="btn btn-small" onClick={() => onLoad(n)}>load</button>
-                <button className="btn btn-small btn-danger" onClick={() => onDelete(n)}>×</button>
+                <button className="btn-sm" onClick={() => onLoad(n)}>load</button>
+                <button className="btn-sm btn-danger" title="delete" onClick={() => onDelete(n)}>×</button>
               </li>
             ))}
           </ul>

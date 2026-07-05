@@ -1,6 +1,7 @@
 """PlaygroundState: owns the live session — one engine template + one realtime
 player — and is the single authority for the server-side mirror of control
-state (affect, pinned overrides, the live MappingTable, seed).
+state (affect, pinned overrides, the live MappingTable, seed, console config,
+loaded sample, jump-to-bar target, and the affect-automation track).
 
 Every control method updates the mirror AND, if a player is running, forwards
 to its thread-safe command queue (applied at a bar edge on the generation
@@ -21,7 +22,7 @@ from musicgen.playground.telemetry import to_jsonable
 # a tighter look-ahead than the demos: generation is µs-fast, so a small buffer
 # keeps live lever moves audible within a beat instead of the default 2.5 s
 _LEAD_SECONDS = 0.6
-_PRIME_SECONDS = 0.2
+_MAX_SEEK_BARS = 4096  # jump-to-bar warms one bar at a time; keep the fast-forward bounded
 
 _AFFECT_RANGE = {"valence": (-1.0, 1.0), "energy": (0.0, 1.0), "tension": (0.0, 1.0)}
 _INT_OVERRIDES = {"velocity_center", "accent_depth", "register_center"}
@@ -78,6 +79,7 @@ class PlaygroundState:
         self._start_bar = 0  # jump-to-bar: where the next start() begins
         self.automation = {"enabled": False, "loop_bars": 0,
                            "points": [dict(p) for p in _DEFAULT_AUTOMATION]}
+        self.exporting = False  # an offline bounce owns the one graph; blocks start()
         self.player = None
 
     # ------------------------------------------------------------- lifecycle
@@ -95,19 +97,27 @@ class PlaygroundState:
             self._console_config = ConsoleConfig(enable_meter=True)
         return self._console_config
 
+    def _numeric_console_names(self) -> set:
+        """ConsoleConfig fields that are plain numbers — the only ones the editor
+        may set (never coerce str/bool fields like sample_path/enable_meter)."""
+        cc = self._cc()
+        return {f.name for f in fields(type(cc))
+                if isinstance(getattr(cc, f.name), (int, float)) and not isinstance(getattr(cc, f.name), bool)}
+
     def _console_values(self) -> dict:
         cc = self._cc()
-        return {f.name: getattr(cc, f.name) for f in fields(type(cc))
-                if isinstance(getattr(cc, f.name), (int, float)) and not isinstance(getattr(cc, f.name), bool)}
+        return {n: getattr(cc, n) for n in self._numeric_console_names()}
 
     def start(self, on_bar) -> None:
         if self.player is not None:
             return
+        if self.exporting:
+            raise RuntimeError("an export is in progress — try again once it finishes")
         from musicgen.synth.render import RealtimeSynthPlayer
 
         player = RealtimeSynthPlayer(
             self._build_engine(), on_bar=on_bar,
-            lead_seconds=_LEAD_SECONDS, prime_seconds=_PRIME_SECONDS,
+            lead_seconds=_LEAD_SECONDS,
             config=self._cc(), start_bar=self._start_bar,
             automation=self._player_automation(),
         )
@@ -135,9 +145,13 @@ class PlaygroundState:
 
     def level(self) -> float:
         player = self.player
-        if player is None or player.console is None:
+        console = player.console if player is not None else None  # capture once: the
+        if console is None:                                       # player thread nulls
+            return 0.0                                            # console mid-rebuild
+        try:
+            return console.level()
+        except Exception:  # noqa: BLE001
             return 0.0
-        return player.console.level()
 
     def cpu(self) -> float:
         player = self.player
@@ -154,8 +168,9 @@ class PlaygroundState:
             if val is not None:
                 self.affect[key] = _clamp(float(val), *_AFFECT_RANGE[key])
         if self.player is not None:
-            kw = {k: float(v) for k, v in (("valence", valence), ("energy", energy),
-                                           ("tension", tension)) if v is not None}
+            # forward the clamped mirror values, not the raw input
+            kw = {k: self.affect[k] for k, v in (("valence", valence), ("energy", energy),
+                                                 ("tension", tension)) if v is not None}
             self.player.set_affect(urgent=urgent, **kw)
 
     def set_override(self, name: str, value) -> None:
@@ -200,8 +215,8 @@ class PlaygroundState:
         """Apply numeric ConsoleConfig edits — a STRUCTURAL change that rebuilds
         the console (brief gap). Only numeric fields are exposed to the editor."""
         cc = self._cc()
-        known = {f.name for f in fields(type(cc))}
-        applied = {name: float(value) for name, value in updates.items() if name in known}
+        numeric = self._numeric_console_names()  # ignore non-numeric fields, don't float() them
+        applied = {name: float(value) for name, value in updates.items() if name in numeric}
         if not applied:
             return
         self._console_config = replace(cc, **applied)
@@ -239,17 +254,22 @@ class PlaygroundState:
         return (self._automation_curve(), int(self.automation["loop_bars"]))
 
     def set_automation(self, enabled=None, loop_bars=None, points=None) -> None:
-        if enabled is not None:
-            self.automation["enabled"] = bool(enabled)
-        if loop_bars is not None:
-            self.automation["loop_bars"] = max(0, int(loop_bars))
+        # build/validate the new points first, so a malformed list raises before
+        # any of the three fields is mutated (all-or-nothing)
+        new_points = None
         if points is not None:
-            self.automation["points"] = [{
+            new_points = [{
                 "bar": max(0, int(p["bar"])),
                 "valence": _clamp(float(p["valence"]), *_AFFECT_RANGE["valence"]),
                 "energy": _clamp(float(p["energy"]), *_AFFECT_RANGE["energy"]),
                 "tension": _clamp(float(p["tension"]), *_AFFECT_RANGE["tension"]),
             } for p in points]
+        if enabled is not None:
+            self.automation["enabled"] = bool(enabled)
+        if loop_bars is not None:
+            self.automation["loop_bars"] = max(0, int(loop_bars))
+        if new_points is not None:
+            self.automation["points"] = new_points
         if self.player is not None:
             auto = self._player_automation()
             self.player.set_automation(auto[0] if auto else None,
@@ -258,7 +278,7 @@ class PlaygroundState:
     def seek(self, bar) -> None:
         """Jump-to-bar: play resumes from this (deterministic) bar. Restarts a
         running player, which warms the engine there with no audio."""
-        self._start_bar = max(0, int(bar))
+        self._start_bar = max(0, min(int(bar), _MAX_SEEK_BARS))
         self._restart()
 
     # ------------------------------------------------------- sessions / export
@@ -303,8 +323,8 @@ class PlaygroundState:
         if "mapping" in data:
             self.mapper = self._mapper_from_dict(data["mapping"])
         if "console" in data:
-            known = {f.name for f in fields(type(self._cc()))}
-            nums = {k: float(v) for k, v in data["console"].items() if k in known}
+            numeric = self._numeric_console_names()
+            nums = {k: float(v) for k, v in data["console"].items() if k in numeric}
             self._console_config = replace(self._cc(), **nums)  # keeps sample_path
         if "automation" in data:
             self.set_automation(data["automation"].get("enabled"),
@@ -312,13 +332,11 @@ class PlaygroundState:
                                 data["automation"].get("points"))
         self._restart()  # rebuild a running player with the imported config
 
-    def render_export(self, kind: str, bars: int, path) -> "Path":
+    def render_export(self, kind: str, bars: int, path) -> Path:
         """Offline bounce of the current config from bar 0 — a fresh engine
         (deterministic), driven by the automation curve if enabled: WAV via the
         synth console, or a standard-MIDI file. Caller must ensure the live
         player is stopped (one signalflow graph at a time)."""
-        from pathlib import Path as _Path
-
         engine = self._build_engine()
         auto = self._player_automation()
         results = []
@@ -340,7 +358,7 @@ class PlaygroundState:
         else:
             from musicgen.synth.render import render_offline
             render_offline(results, meter, path, config=self._cc())
-        return _Path(path)
+        return Path(path)
 
     # ------------------------------------------------------------- readback
     def snapshot(self) -> dict:
