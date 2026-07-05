@@ -46,6 +46,27 @@ export interface FieldDef {
   kind: "scalar" | "struct";
 }
 
+export interface EnumOption {
+  label: string;
+  value: string | number;
+}
+
+export interface ParamSpec {
+  name: string;
+  kind: "float" | "int" | "enum";
+  boundary: string; // "beat" | "bar" | "phrase"
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: EnumOption[];
+}
+
+export interface ParamGroup {
+  group: string;
+  label: string;
+  params: ParamSpec[];
+}
+
 export interface SchemaMsg {
   type: "schema";
   affect: Record<"valence" | "energy" | "tension", { min: number; max: number; default: number }>;
@@ -56,6 +77,8 @@ export interface SchemaMsg {
   instrument_tiers: [string, [string, number][]][];
   layer_gates: [string, number][];
   layers: string[];
+  layers_boundary: string;
+  param_ui: ParamGroup[];
   patches_by_layer: Record<string, string[]>;
   modes: { name: string; brightness: number }[];
   meter: { numerator: number; denominator: number };
@@ -75,6 +98,7 @@ export interface BarMsg {
   bar: number;
   context: BarContext;
   params: Params;
+  mapped: Record<string, number | string>;
   affect: Affect;
   tempo_points: [number, number][];
   trace: string[];

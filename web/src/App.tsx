@@ -5,6 +5,7 @@ import { TelemetryHeader } from "./components/TelemetryHeader";
 import { TraceLog } from "./components/TraceLog";
 import { Meter } from "./components/Meter";
 import { Transport } from "./components/Transport";
+import { ParamGrid } from "./components/ParamGrid";
 
 export default function App() {
   const s = useMain();
@@ -42,6 +43,11 @@ export default function App() {
           <TraceLog />
         </section>
       </main>
+
+      <section className="panel pgrid-panel">
+        <div className="panel-title">parameters · follow / pin</div>
+        <ParamGrid />
+      </section>
 
       {s.error && <div className="error-bar">error: {s.error}</div>}
     </div>

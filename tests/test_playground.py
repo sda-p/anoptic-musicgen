@@ -44,7 +44,27 @@ def test_bar_telemetry_roundtrips():
     assert msg["affect"]["energy"] == 0.7
     assert msg["pinned"] == ["tempo_bpm"]
     assert msg["trace"]                                        # decision trace carried
+    assert "mapped" in msg                                     # follow/pin ghost slot
     json.dumps(msg)
+
+
+def test_param_ui_and_mapped_ghost():
+    s = telemetry.schema()
+    groups = {g["group"]: g for g in s["param_ui"]}
+    assert set(groups) == {"energy", "valence", "tension", "dsp"}
+    tempo = next(p for p in groups["energy"]["params"] if p["name"] == "tempo_bpm")
+    assert tempo["kind"] == "float" and tempo["min"] == 60.0 and tempo["max"] == 160.0 and tempo["boundary"] == "beat"
+    mode = next(p for g in s["param_ui"] for p in g["params"] if p["name"] == "mode")
+    assert mode["kind"] == "enum" and {o["value"] for o in mode["options"]} >= {"ionian", "lydian"}
+    # dissonance_budget is intentionally excluded — the engine ties it to tension
+    names = {p["name"] for g in s["param_ui"] for p in g["params"]}
+    assert "dissonance_budget" not in names
+
+    m = telemetry.mapped_targets((0.3, 0.5, 0.45), MappingTable())
+    assert m["mode"] in {o["value"] for o in mode["options"]}
+    assert 60.0 <= m["tempo_bpm"] <= 160.0
+    assert isinstance(m["accent_depth"], int)
+    json.dumps(m)
 
 
 def test_override_mirror_and_coercion():

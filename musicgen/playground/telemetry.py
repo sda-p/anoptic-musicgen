@@ -42,16 +42,84 @@ def params_dict(params) -> dict:
     return {f.name: to_jsonable(getattr(params, f.name)) for f in fields(type(params))}
 
 
-def bar_telemetry(result, pinned) -> dict:
+# the follow/pin grid, grouped by which affect lever primarily drives each param
+# (name, kind, boundary[, min, max, step]); boundary is the natural musical
+# quantum a change is "musical" at. dissonance_budget is omitted — the engine
+# ties it to tension and ignores the override, so a control would be inert.
+_GROUPS = (
+    ("energy", "follows energy", (
+        ("tempo_bpm", "float", "beat", 60.0, 160.0, 0.5),
+        ("note_density", "float", "bar", 0.0, 1.0, 0.01),
+        ("roughness", "float", "bar", 0.0, 0.6, 0.01),
+        ("articulation", "float", "bar", 0.45, 1.05, 0.01),
+        ("velocity_center", "int", "bar", 30, 110, 1),
+        ("accent_depth", "int", "bar", 0, 30, 1),
+    )),
+    ("valence", "follows valence", (
+        ("mode", "enum", "phrase"),
+        ("register_center", "int", "bar", 48, 84, 1),
+        ("stereo_width", "float", "bar", 0.0, 1.3, 0.01),
+    )),
+    ("tension", "follows tension", (
+        ("cadence_policy", "enum", "phrase"),
+        ("harmonic_rhythm", "enum", "bar"),
+    )),
+    ("dsp", "signal / mix", (
+        ("filter_cutoff", "float", "bar", 120.0, 8000.0, 10.0),
+        ("reverb_send", "float", "bar", 0.0, 1.0, 0.01),
+        ("delay_send", "float", "bar", 0.0, 1.0, 0.01),
+        ("drive", "float", "bar", 0.0, 1.0, 0.01),
+    )),
+)
+_ENUM_OPTIONS = {
+    "cadence_policy": [{"label": "authentic", "value": "authentic"},
+                      {"label": "half", "value": "half"},
+                      {"label": "deceptive", "value": "deceptive"}],
+    "harmonic_rhythm": [{"label": "1 / bar", "value": 1.0},
+                        {"label": "1 / 2 bars", "value": 0.5}],
+    # "mode" options are filled from the brightness axis in schema()
+}
+
+
+def mapped_targets(affect: tuple, mapper) -> dict:
+    """What the mapping table would produce for each overridable param at this
+    affect (instantaneous targets, pre-slew/pre-hysteresis) — the "ghost" the
+    follow/pin grid shows beside a pinned value so an override is legible as a
+    departure from the heuristic."""
+    from musicgen.control import mapping
+    from musicgen.control.levers import Affect
+    a, t = Affect(*affect), mapper
+    return {
+        "tempo_bpm": round(mapping.tempo_target(a, t), 2),
+        "note_density": round(mapping.density_target(a, t), 3),
+        "roughness": round(mapping.roughness_target(a, t), 3),
+        "articulation": round(mapping.articulation_target(a, t), 3),
+        "velocity_center": round(mapping.velocity_target(a, t)),
+        "accent_depth": mapping.accent_target(a, t),
+        "register_center": mapping.register_target(a, t),
+        "harmonic_rhythm": mapping.harmonic_rhythm_target(a, t),
+        "cadence_policy": mapping.pick_cadence_policy(a.tension, t),
+        "mode": mapping.nearest_mode(a.valence),
+        "filter_cutoff": round(mapping.filter_cutoff_target(a, t), 1),
+        "reverb_send": round(mapping.reverb_send_target(a, t), 3),
+        "delay_send": round(mapping.delay_send_target(a, t), 3),
+        "drive": round(mapping.drive_target(a, t), 3),
+        "stereo_width": round(mapping.stereo_width_target(a, t), 3),
+    }
+
+
+def bar_telemetry(result, pinned, mapped=None) -> dict:
     """The per-bar message pushed to every client: the whole inspection payload
-    (chord/key, the params actually used, affect, the decision trace, the
-    events for a piano-roll) plus which Tier-2 params are currently pinned."""
+    (chord/key, the params actually used, affect, the decision trace, the events
+    for a piano-roll), which Tier-2 params are pinned, and the mapper's would-be
+    targets (the follow/pin ghost)."""
     valence, energy, tension = result.affect
     return {
         "type": "bar",
         "bar": result.bar,
         "context": context_dict(result.context),
         "params": params_dict(result.params),
+        "mapped": mapped or {},
         "affect": {"valence": valence, "energy": energy, "tension": tension},
         "tempo_points": [list(tp) for tp in result.tempo_points],
         "trace": list(result.trace),
@@ -94,6 +162,21 @@ def schema() -> dict:
     except Exception:  # noqa: BLE001
         pass
 
+    enum_options = dict(_ENUM_OPTIONS)
+    enum_options["mode"] = [{"label": m, "value": m}
+                            for m, _ in sorted(BRIGHTNESS.items(), key=lambda kv: kv[1])]
+    param_ui = []
+    for group, label, specs in _GROUPS:
+        rows = []
+        for spec in specs:
+            entry = {"name": spec[0], "kind": spec[1], "boundary": spec[2]}
+            if spec[1] in ("float", "int"):
+                entry["min"], entry["max"], entry["step"] = spec[3], spec[4], spec[5]
+            else:
+                entry["options"] = enum_options[spec[0]]
+            rows.append(entry)
+        param_ui.append({"group": group, "label": label, "params": rows})
+
     return {
         "type": "schema",
         "affect": {
@@ -108,6 +191,8 @@ def schema() -> dict:
         "instrument_tiers": to_jsonable(mt.instrument_tiers),
         "layer_gates": to_jsonable(mt.layer_gates),
         "layers": list(LAYER_NAMES),
+        "layers_boundary": "bar",
+        "param_ui": param_ui,
         "patches_by_layer": patches_by_layer,
         "modes": [{"name": m, "brightness": b}
                   for m, b in sorted(BRIGHTNESS.items(), key=lambda kv: kv[1])],

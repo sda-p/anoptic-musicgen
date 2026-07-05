@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { Affect, BarContext, Params, SchemaMsg } from "./protocol";
+import type { Affect, BarContext, ParamGroup, Params, SchemaMsg } from "./protocol";
 
 // A minimal external store: replace-and-notify. Two instances keep the 30 fps
 // meter feed off the per-bar telemetry store, so meter frames never re-render
@@ -30,7 +30,10 @@ export interface MainState {
   engineAffect: Affect; // per-bar reported affect (the pad/fader "ghost")
   context: BarContext | null;
   params: Params | null;
-  pinned: string[];
+  mapped: Record<string, number | string>; // mapper targets (follow/pin ghost)
+  pinned: Record<string, unknown>; // name -> pinned value
+  paramUi: ParamGroup[];
+  paramDefaults: Record<string, unknown>; // per-param default (fallback when stopped)
   bar: number | null;
   trace: string[];
   schema: SchemaMsg | null;
@@ -45,7 +48,10 @@ export const mainStore = createStore<MainState>({
   engineAffect: DEFAULT_AFFECT,
   context: null,
   params: null,
-  pinned: [],
+  mapped: {},
+  pinned: {},
+  paramUi: [],
+  paramDefaults: {},
   bar: null,
   trace: [],
   schema: null,

@@ -26,14 +26,18 @@ export function connect(): void {
 function handle(msg: ServerMessage): void {
   switch (msg.type) {
     case "schema":
-      mainStore.set({ schema: msg });
+      mainStore.set({
+        schema: msg,
+        paramUi: msg.param_ui,
+        paramDefaults: Object.fromEntries(msg.params.map((p) => [p.name, p.default])),
+      });
       break;
     case "snapshot":
       mainStore.set({
         running: msg.running,
         seed: msg.seed,
         snapshotAffect: msg.affect,
-        pinned: Object.keys(msg.pinned),
+        pinned: msg.pinned,
       });
       break;
     case "bar": {
@@ -41,8 +45,8 @@ function handle(msg: ServerMessage): void {
       mainStore.set({
         context: msg.context,
         params: msg.params,
+        mapped: msg.mapped,
         engineAffect: msg.affect,
-        pinned: msg.pinned,
         bar: msg.bar,
         trace,
       });
@@ -68,4 +72,15 @@ export const api = {
   stop: () => send({ type: "transport", action: "stop" }),
   setAffect: (a: Partial<Affect>, urgent = false) => send({ type: "set_affect", ...a, urgent }),
   reseed: (seed: number) => send({ type: "reseed", seed }),
+  // pin a Tier-2 param (optimistic: update the store now, the server snapshot confirms)
+  setOverride: (name: string, value: unknown) => {
+    mainStore.set({ pinned: { ...mainStore.get().pinned, [name]: value } });
+    send({ type: "set_override", name, value });
+  },
+  clearOverride: (name: string) => {
+    const pinned = { ...mainStore.get().pinned };
+    delete pinned[name];
+    mainStore.set({ pinned });
+    send({ type: "clear_override", name });
+  },
 };

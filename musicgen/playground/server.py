@@ -41,7 +41,9 @@ class Hub:
             return
         player = self.state.player
         pinned = sorted(player.engine.overrides) if player is not None else []
-        msg = telemetry.bar_telemetry(result, pinned)
+        mapped = (telemetry.mapped_targets(result.affect, player.engine.config.mapper)
+                  if player is not None else {})
+        msg = telemetry.bar_telemetry(result, pinned, mapped)
         loop.call_soon_threadsafe(queue.put_nowait, msg)
 
     async def broadcast(self, msg: dict) -> None:
