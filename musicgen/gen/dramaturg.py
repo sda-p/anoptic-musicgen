@@ -25,6 +25,17 @@ brightens — all graded by how long it withheld. Still traced-only: the
 voicing-inversion nuance of the tonic bias and the *structural* escalation rungs
 (ostinato, step-up sequences — partly blocked on M14 pedals) — the remainder of M13.
 
+M14 (earned dissonance, §5.8): the dramaturg also deploys *obligation-bearing*
+dissonance — structural tension that must resolve, distinct from the ambient
+tension-tiered colour of `_choose_extensions`. It ornaments every cadence it
+controls with a prepared **suspension** (`Directive.suspend`): while withholding
+these resolve into deceptive cadences (local relief, the debt stands); on the spend
+one resolves into the tonic, so the payoff is itself a resolved dissonance. The pad
+realizes a suspension only where a prepared voice exists, so an infeasible request
+plants nothing (never a dangling obligation the linter would flag). Gated by
+`DramaturgConfig.earned_dissonance` (False => M13-identical). Pedals, cadential
+appoggiaturas, and secondary-dominant / modal-mixture obligations follow.
+
 Determinism: `on_bar` mutates the ledger in place, so the ledger is a pure
 function of (seed, affect trajectory, bar). With the dramaturg disabled
 (EngineConfig.dramaturg is None) the conductor never touches the ledger and its
@@ -32,7 +43,7 @@ output is byte-identical to today.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from musicgen.gen.structure import PhrasePos
 
@@ -51,6 +62,7 @@ class DramaturgConfig:
     escalation_cap: int = 4     # rungs of sustained withholding to reach full escalation intensity
     big_spend: float = 0.7      # payoff magnitude above which the spend lifts the mode 2 steps, not 1
     max_debt: int = 96          # clamp so a runaway trajectory can't unbound the ledger
+    earned_dissonance: bool = True  # M14: deploy obligation-bearing dissonance (suspensions …); False => M13-identical
 
 
 @dataclass
@@ -82,6 +94,7 @@ class Directive:
     withhold_root_tonic: bool = False   # applied: the walk circles the tonic (voicing-inversion TBD)
     escalation: int = 0                 # the escalation rung (drives intensify; also traced)
     payoff: float = 0.0                 # >0 on a spend bar: the graded resolution magnitude
+    suspend: bool = False               # applied (M14): request a prepared pad suspension this bar
     note: str = ""
 
 
@@ -134,6 +147,15 @@ class Dramaturg:
                 directive = Directive(note=ledger.last_note)
         # persist the tonic-suppression signal for the walk, which runs a bar ahead
         ledger.suppress_tonic = directive.withhold_root_tonic
+        # M14 earned dissonance: ornament a cadence the dramaturg controls with a
+        # prepared suspension. While withholding it resolves *into a deceptive
+        # cadence* (local relief, the debt stands); on the spend it resolves *into
+        # the tonic* — the payoff itself is a resolved dissonance. The pad realizes
+        # it only where a prepared voice exists, so an infeasible request plants
+        # nothing (and never a dangling obligation).
+        if (self.cfg.earned_dissonance and pos.slot in ("pre-cadence", "cadence")
+                and ledger.phrase_cadence.get(pos.phrase) is not None):
+            directive = replace(directive, suspend=True)
         return directive
 
     def _withholding(self, ledger: Ledger) -> tuple[int, tuple[str, ...], float, int]:

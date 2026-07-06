@@ -3,8 +3,10 @@
 M0 rules: scale membership with role-licensed chromaticism, annotation
 consistency, pre-modifier grid alignment. M1 rules: pad voicing quality
 (unison doubling, register, chord membership, voice movement), bass root and
-chord membership, cadence realization. Value-range checks live in
-NoteEvent.__post_init__.
+chord membership, cadence realization. M14 rules (§5.8): obligations-checking —
+a planted structural dissonance must discharge (a suspension resolves down by
+step, a pedal terminates at a cadence, a borrowed chord / secondary dominant
+returns). Value-range checks live in NoteEvent.__post_init__.
 
 stage="pre" lints generator output (grid-aligned); stage="post" lints after
 modifiers, which may move events off-grid.
@@ -21,8 +23,11 @@ from musicgen.theory.pitch import pitch_name
 # Roles that license a pitch outside the bar's scale. "echo" covers modifier
 # repeats bleeding into the next bar's harmony (reverb-like, not a wrong note).
 CHROMATIC_ROLES = {"approach", "borrowed", "chromatic", "echo"}
-# Roles that license a non-chord tone (melodic embellishment etc.).
-LICENSED_NONCHORD = CHROMATIC_ROLES | {"passing", "neighbor", "pedal", "appoggiatura"}
+# Roles that license a non-chord tone (melodic embellishment, held pedal, a
+# prepared suspension). The obligation-bearing ones (pedal, suspension) also
+# have to *discharge* — see _lint_obligations (M14, §5.8).
+LICENSED_NONCHORD = CHROMATIC_ROLES | {"passing", "neighbor", "pedal", "appoggiatura", "suspension"}
+SUSPENSION_ROLE, RESOLUTION_ROLE, PEDAL_ROLE = "suspension", "resolution", "pedal"
 
 CADENCE_DEGREES = {"authentic": (1,), "half": (5,), "deceptive": (6,)}
 PRE_CADENCE_DEGREES = {"authentic": (5, 7), "half": (2, 4), "deceptive": (5, 7)}
@@ -114,9 +119,9 @@ def _lint_pad(events, ctx_by_bar, meter, limits, stage, out) -> None:
                 out.append(Violation("pad-range", bar, f"{pitch_name(p)} outside pad range [{pitch_name(lo)}, {pitch_name(hi)}]"))
         ctx = ctx_by_bar.get(bar)
         if ctx is not None and ctx.chord_pcs:
-            for p in pitches:
-                if p % 12 not in ctx.chord_pcs:
-                    out.append(Violation("chord-tone", bar, f"pad {pitch_name(p)} is not a member of {ctx.chord_sym} (pcs {ctx.chord_pcs})"))
+            for ev in groups[start]:
+                if ev.pitch % 12 not in ctx.chord_pcs and ev.role not in LICENSED_NONCHORD:
+                    out.append(Violation("chord-tone", bar, f"pad {pitch_name(ev.pitch)} is not a member of {ctx.chord_sym} (pcs {ctx.chord_pcs})"))
         if voicing_rules and prev_pitches is not None and len(prev_pitches) == len(pitches):
             for i, (a, b) in enumerate(zip(prev_pitches, pitches)):
                 if abs(b - a) > limits.max_voice_move:
@@ -137,7 +142,9 @@ def _lint_bass(events, ctx_by_bar, meter, limits, out) -> None:
         if ctx is None or not ctx.chord_pcs:
             continue
         if meter.beat_in_bar(ev.start) == 1.0:
-            if ev.pitch % 12 != ctx.chord_pcs[0]:
+            if ev.pitch % 12 != ctx.chord_pcs[0] and ev.role not in LICENSED_NONCHORD:
+                # a pedal (held bass under shifting harmony) is a licensed non-root
+                # beat-1 bass; it carries a termination obligation instead (§5.8).
                 out.append(Violation(
                     "bass-root", bar,
                     f"beat-1 bass {pitch_name(ev.pitch)} is not the bass pc of {ctx.chord_sym} (pc {ctx.chord_pcs[0]})",
@@ -215,6 +222,82 @@ def _lint_cadences(contexts, out) -> None:
             ))
 
 
+def _lint_obligations(events, ctx_by_bar, meter, out) -> None:
+    """M14 obligations-checking (§5.8): a planted structural dissonance must
+    discharge. Dormant on output that plants none — no suspension/pedal roles and
+    no context obligations means these loops find nothing, so pre-M14 renders are
+    unaffected.
+
+    Three obligations:
+      * a **suspension** is prepared (its pitch sounds in the same layer right
+        before) and resolves down by step to a chord tone at its release;
+      * a **pedal** run (contiguous same-pitch bass) terminates at a cadence;
+      * a **context obligation** — a structural borrowing returns to diatonic
+        within two bars; a secondary dominant (`tonicize:N`) resolves to degree N.
+    """
+    by_layer: dict[str, list[NoteEvent]] = {}
+    for ev in events:
+        by_layer.setdefault(ev.layer, []).append(ev)
+
+    for ev in events:
+        if ev.role != SUSPENSION_ROLE:
+            continue
+        bar = meter.bar_of(ev.start)
+        layer = by_layer[ev.layer]
+        prepared = any(n is not ev and n.pitch == ev.pitch and abs(n.end - ev.start) < 1e-9
+                       for n in layer)
+        if not prepared:
+            out.append(Violation("suspension-prep", bar,
+                f"{pitch_name(ev.pitch)} ({ev.layer}) suspension is unprepared "
+                f"(no held tone of the same pitch precedes it)"))
+        resolved = False
+        for n in layer:
+            if n is ev or abs(n.start - ev.end) > 1e-9 or not 1 <= ev.pitch - n.pitch <= 2:
+                continue
+            rctx = ctx_by_bar.get(meter.bar_of(n.start))
+            if rctx is not None and rctx.chord_pcs and n.pitch % 12 in rctx.chord_pcs:
+                resolved = True
+                break
+        if not resolved:
+            out.append(Violation("suspension", bar,
+                f"{pitch_name(ev.pitch)} ({ev.layer}) suspension does not resolve down "
+                f"by step to a chord tone at beat {meter.beat_in_bar(ev.end):.3g}"))
+
+    pedals = sorted((e for e in events if e.role == PEDAL_ROLE), key=lambda e: e.start)
+    i = 0
+    while i < len(pedals):
+        j = i
+        while (j + 1 < len(pedals) and pedals[j + 1].pitch == pedals[i].pitch
+               and meter.bar_of(pedals[j + 1].start) - meter.bar_of(pedals[j].start) <= 1):
+            j += 1
+        first_bar, last_bar = meter.bar_of(pedals[i].start), meter.bar_of(pedals[j].start)
+        # the pedal resolves *into* the cadence: its last held bar is the cadence,
+        # or the cadence chord arrives in the bar right after.
+        if not any((c := ctx_by_bar.get(b)) is not None and c.cadence_slot == "cadence"
+                   for b in (last_bar, last_bar + 1)):
+            out.append(Violation("pedal", first_bar,
+                f"{pitch_name(pedals[i].pitch)} pedal (bars {first_bar + 1}..{last_bar + 1}) "
+                f"does not terminate at a cadence"))
+        i = j + 1
+
+    for bar, ctx in ctx_by_bar.items():
+        obl = ctx.obligation
+        if not obl:
+            continue
+        if obl == "borrowed":
+            if not any((c := ctx_by_bar.get(b)) is not None
+                       and (c.chord is None or c.chord.source_mode is None)
+                       for b in (bar + 1, bar + 2)):
+                out.append(Violation("borrowed", bar,
+                    f"borrowed chord {ctx.chord_sym or '(?)'} does not return to diatonic within 2 bars"))
+        elif obl.startswith("tonicize:"):
+            target = int(obl.split(":", 1)[1])
+            nxt = ctx_by_bar.get(bar + 1)
+            if nxt is None or nxt.chord is None or nxt.chord.degree != target:
+                out.append(Violation("tonicize", bar,
+                    f"secondary dominant {ctx.chord_sym or '(?)'} does not resolve to degree {target}"))
+
+
 def lint(
     events: Sequence[NoteEvent],
     contexts: Sequence[HarmonicContext],
@@ -228,8 +311,9 @@ def lint(
     _lint_events(events, ctx_by_bar, meter, stage, out)
     _lint_pad(events, ctx_by_bar, meter, limits, stage, out)
     _lint_bass(events, ctx_by_bar, meter, limits, out)
-    if stage == "pre":  # slot-based melodic analysis assumes the unmodified grid
+    if stage == "pre":  # slot-based melodic + obligation analysis assumes the unmodified grid
         _lint_melody(events, ctx_by_bar, meter, limits, out)
+        _lint_obligations(events, ctx_by_bar, meter, out)
     _lint_perc(events, limits, meter, out)
     _lint_cadences(contexts, out)
     return out

@@ -504,7 +504,9 @@ class MusicEngine:
             trace.append(instr_note)
         layers = params.layers
         if "pad" in layers:
-            pad_events, voicing, pad_trace = generate_pad(ctx, cfg.meter, params, state.prev_voicing, cfg.voicing)
+            pad_events, voicing, pad_trace = generate_pad(
+                ctx, cfg.meter, params, state.prev_voicing, cfg.voicing,
+                suspend=directive is not None and directive.suspend)
             events.extend(pad_events)
             state.prev_voicing = voicing
             trace.append(pad_trace)
