@@ -178,10 +178,10 @@ def test_suspension_pair_rejects_chromatic():
 
 # --- the dramaturg deploys suspensions over the cadences it controls ----------
 
-def _dramaturg_render(earned, phrases=4):
+def _dramaturg_render(earned, phrases=4, seed=42):
     cfg = EngineConfig(meter=METER, mapper=MappingTable(),
                        dramaturg=DramaturgConfig(leniency=0.5, earned_dissonance=earned))
-    eng = MusicEngine(seed=42, config=cfg)
+    eng = MusicEngine(seed=seed, config=cfg)
     pb = cfg.phrase_bars
     results = []
     eng.set_affect(valence=-0.2, energy=0.7, tension=0.85)   # sustained high: accrue
@@ -209,6 +209,46 @@ def test_dramaturg_deploys_terminating_pedal():
     assert pedals, "sustained withholding should engage a dominant pedal"
     assert len({ev.pitch for ev in pedals}) == 1, "a pedal point holds one fixed pitch"
     assert lint(raw, contexts, METER, stage="pre") == []      # and it terminates at a cadence
+
+
+# --- appoggiaturas: the unprepared payoff lean, scoped to the pad (M14.4) ------
+
+def test_pad_appoggiatura_resolves_clean():
+    # over I(C E G): an unprepared D leans in and resolves down to C — no
+    # preparation required (unlike a suspension).
+    events = [
+        NoteEvent(0.0, 4.0, 64, 74, "pad", role="chord-tone"),   # E sustained
+        NoteEvent(0.0, 4.0, 67, 74, "pad", role="chord-tone"),   # G sustained
+        NoteEvent(0.0, 2.0, 62, 74, "pad", role="appoggiatura"), # D leaning in, unprepared
+        NoteEvent(2.0, 2.0, 60, 74, "pad", role="resolution"),   # -> C
+    ]
+    assert lint(events, [_ctx(0, "I", (0, 4, 7))], METER, stage="pre") == []
+
+
+def test_pad_appoggiatura_unresolved_flagged():
+    events = [
+        NoteEvent(0.0, 4.0, 64, 74, "pad", role="chord-tone"),
+        NoteEvent(0.0, 4.0, 67, 74, "pad", role="chord-tone"),
+        NoteEvent(0.0, 2.0, 62, 74, "pad", role="appoggiatura"),  # D just stops, never resolves
+    ]
+    assert "appoggiatura" in _rules(events, [_ctx(0, "I", (0, 4, 7))])
+
+
+def test_melodic_appoggiatura_is_exempt():
+    # the melody's appoggiaturas pass through non-chord tones mid-run; the pad-only
+    # obligation must not touch them (an unresolved melodic one is not flagged).
+    events = [NoteEvent(0.25, 0.75, 62, 80, "melody", role="appoggiatura")]  # offbeat D, unresolved
+    assert "appoggiatura" not in _rules(events, [_ctx(0, "I", (0, 4, 7))])
+
+
+def test_dramaturg_leans_appoggiatura_when_no_suspension():
+    # seed 1's payoff cadence has no preparable suspension, so the pad leans in
+    # with an unprepared appoggiatura — which still resolves.
+    results = _dramaturg_render(earned=True, seed=1)
+    raw = [ev for r in results for ev in r.raw_events]
+    contexts = [r.context for r in results]
+    assert [ev for ev in raw if ev.role == "appoggiatura" and ev.layer == "pad"]
+    assert lint(raw, contexts, METER, stage="pre") == []
 
 
 def test_earned_dissonance_off_is_inert():

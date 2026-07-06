@@ -77,13 +77,17 @@ def main() -> None:
     print("\nearned-vs-ambient render A/B (same seed, same arc):")
     for earned in (False, True):
         results = render(args.seed, earned, args.leniency)
-        susp = sum(1 for r in results for ev in r.raw_events if ev.role == "suspension")
+        raw = [ev for r in results for ev in r.raw_events]
+        susp = sum(1 for ev in raw if ev.role == "suspension")
+        appog = sum(1 for ev in raw if ev.role == "appoggiatura" and ev.layer == "pad")
+        pedal_bars = len({int(ev.start // Meter().bar_quarters) for ev in raw if ev.role == "pedal"})
         tag = "earned" if earned else "ambient"
         emit(results, Meter(), f"dissonance_{tag}_s{args.seed}", args.out_dir,
              header=(f"M14 earned dissonance │ seed {args.seed} │ leniency {args.leniency} │ "
-                     f"{tag} ({'suspensions deployed' if earned else 'ambient colour only'})\n"),
+                     f"{tag} ({'obligation-bearing dissonance' if earned else 'ambient colour only'})\n"),
              no_audio=args.no_audio, play=args.play)
-        print(f"    {tag:8s}: {susp} prepared suspension(s) over the dramaturg's cadences")
+        print(f"    {tag:8s}: {susp} suspension(s), {appog} cadential appoggiatura(s), "
+              f"{pedal_bars} bar(s) of dominant pedal")
 
 
 if __name__ == "__main__":

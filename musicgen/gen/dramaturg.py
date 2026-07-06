@@ -97,6 +97,7 @@ class Directive:
     escalation: int = 0                 # the escalation rung (drives intensify; also traced)
     payoff: float = 0.0                 # >0 on a spend bar: the graded resolution magnitude
     suspend: bool = False               # applied (M14): request a prepared pad suspension this bar
+    appoggiatura: bool = False          # applied (M14): allow an unprepared pad lean (payoff cadence)
     pedal: int = 0                      # applied (M14): scale degree the bass pedals (0 none; 5 dominant)
     note: str = ""
 
@@ -153,12 +154,16 @@ class Dramaturg:
         # M14 earned dissonance: ornament a cadence the dramaturg controls with a
         # prepared suspension. While withholding it resolves *into a deceptive
         # cadence* (local relief, the debt stands); on the spend it resolves *into
-        # the tonic* — the payoff itself is a resolved dissonance. The pad realizes
-        # it only where a prepared voice exists, so an infeasible request plants
-        # nothing (and never a dangling obligation).
-        if (self.cfg.earned_dissonance and pos.slot in ("pre-cadence", "cadence")
-                and ledger.phrase_cadence.get(pos.phrase) is not None):
-            directive = replace(directive, suspend=True)
+        # the tonic* — the payoff itself is a resolved dissonance. On the payoff
+        # cadence specifically, also permit an unprepared appoggiatura, so the tonic
+        # arrival always gets a resolving lean even when no suspension is preparable.
+        # The pad realizes only what is feasible, so a request never dangles.
+        if self.cfg.earned_dissonance:
+            controlled = ledger.phrase_cadence.get(pos.phrase)
+            if controlled is not None and pos.slot in ("pre-cadence", "cadence"):
+                directive = replace(directive, suspend=True)
+            if controlled == "authentic" and pos.slot == "cadence":
+                directive = replace(directive, appoggiatura=True)
         return directive
 
     def _withholding(self, ledger: Ledger) -> tuple[int, tuple[str, ...], float, int]:

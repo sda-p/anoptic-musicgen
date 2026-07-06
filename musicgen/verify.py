@@ -27,7 +27,8 @@ CHROMATIC_ROLES = {"approach", "borrowed", "chromatic", "echo"}
 # prepared suspension). The obligation-bearing ones (pedal, suspension) also
 # have to *discharge* — see _lint_obligations (M14, §5.8).
 LICENSED_NONCHORD = CHROMATIC_ROLES | {"passing", "neighbor", "pedal", "appoggiatura", "suspension"}
-SUSPENSION_ROLE, RESOLUTION_ROLE, PEDAL_ROLE = "suspension", "resolution", "pedal"
+SUSPENSION_ROLE, RESOLUTION_ROLE, PEDAL_ROLE, APPOGGIATURA_ROLE = (
+    "suspension", "resolution", "pedal", "appoggiatura")
 
 CADENCE_DEGREES = {"authentic": (1,), "half": (5,), "deceptive": (6,)}
 PRE_CADENCE_DEGREES = {"authentic": (5, 7), "half": (2, 4), "deceptive": (5, 7)}
@@ -228,9 +229,11 @@ def _lint_obligations(events, ctx_by_bar, meter, out) -> None:
     no context obligations means these loops find nothing, so pre-M14 renders are
     unaffected.
 
-    Three obligations:
+    Obligations:
       * a **suspension** is prepared (its pitch sounds in the same layer right
         before) and resolves down by step to a chord tone at its release;
+      * a pad **appoggiatura** resolves down by step to a chord tone (the same
+        obligation, unprepared — the payoff lean; melodic ones are exempt);
       * a **pedal** run (contiguous same-pitch bass) terminates at a cadence;
       * a **context obligation** — a structural borrowing returns to diatonic
         within two bars; a secondary dominant (`tonicize:N`) resolves to degree N.
@@ -240,13 +243,18 @@ def _lint_obligations(events, ctx_by_bar, meter, out) -> None:
         by_layer.setdefault(ev.layer, []).append(ev)
 
     for ev in events:
-        if ev.role != SUSPENSION_ROLE:
+        is_susp = ev.role == SUSPENSION_ROLE
+        # an appoggiatura carries the same resolution obligation, but only in the
+        # pad — the melody's own leap / strong-beat rules govern its melodic
+        # appoggiaturas, which pass through non-chord tones mid-run rather than
+        # resolving to a chord tone at once.
+        is_appog = ev.role == APPOGGIATURA_ROLE and ev.layer == "pad"
+        if not (is_susp or is_appog):
             continue
         bar = meter.bar_of(ev.start)
         layer = by_layer[ev.layer]
-        prepared = any(n is not ev and n.pitch == ev.pitch and abs(n.end - ev.start) < 1e-9
-                       for n in layer)
-        if not prepared:
+        if is_susp and not any(n is not ev and n.pitch == ev.pitch and abs(n.end - ev.start) < 1e-9
+                               for n in layer):
             out.append(Violation("suspension-prep", bar,
                 f"{pitch_name(ev.pitch)} ({ev.layer}) suspension is unprepared "
                 f"(no held tone of the same pitch precedes it)"))
@@ -259,8 +267,9 @@ def _lint_obligations(events, ctx_by_bar, meter, out) -> None:
                 resolved = True
                 break
         if not resolved:
-            out.append(Violation("suspension", bar,
-                f"{pitch_name(ev.pitch)} ({ev.layer}) suspension does not resolve down "
+            kind = "suspension" if is_susp else "appoggiatura"
+            out.append(Violation(kind, bar,
+                f"{pitch_name(ev.pitch)} ({ev.layer}) {kind} does not resolve down "
                 f"by step to a chord tone at beat {meter.beat_in_bar(ev.end):.3g}"))
 
     pedals = sorted((e for e in events if e.role == PEDAL_ROLE), key=lambda e: e.start)

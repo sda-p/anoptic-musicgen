@@ -37,6 +37,27 @@ def _suspension_pair(
     return None if best is None else (best[1], best[2])
 
 
+def _appoggiatura_pair(
+    voicing: tuple[int, ...], ctx: HarmonicContext, hi: int,
+) -> tuple[int, int] | None:
+    """An *unprepared* accented non-chord tone a step above a voiced chord tone,
+    resolving down onto it — the payoff lean (no preparation, unlike a suspension).
+    Prefers leaning onto the tonic, then the highest voice; a whole-step over a
+    semitone. Returns (target, appoggiatura) or None."""
+    chord_pcs, tonic_pc = set(ctx.chord_pcs), ctx.scale.pitch_at(1, 4) % 12
+    best: tuple[tuple[bool, int], int, int] | None = None
+    for target in voicing:
+        for step in (2, 1):  # a whole-step lean (e.g. D–C) reads more strongly than a semitone
+            a = target + step
+            if a > hi or a % 12 in chord_pcs or not ctx.scale.contains(a):
+                continue
+            key = (target % 12 == tonic_pc, target)  # onto the tonic first, then the top voice
+            if best is None or key > best[0]:
+                best = (key, target, a)
+            break  # the whole-step lean wins for this target
+    return None if best is None else (best[1], best[2])
+
+
 def generate_pad(
     ctx: HarmonicContext,
     meter: Meter,
@@ -44,11 +65,14 @@ def generate_pad(
     prev_voicing: tuple[int, ...] | None,
     cfg: VoicingConfig,
     suspend: bool = False,
+    appoggiatura: bool = False,
 ) -> tuple[list[NoteEvent], tuple[int, ...], str]:
-    """One bar of sustained chord. Returns (events, voicing, trace). When `suspend`
-    and a prepared voice exists, one voice is delayed as a suspension resolving
-    down by step at the mid-bar pulse; the returned voicing is still the resolved
-    chord (so the next bar voice-leads — and prepares — from the resolution)."""
+    """One bar of sustained chord. Returns (events, voicing, trace). A cadence
+    ornament delays one voice — a prepared **suspension** where one is available,
+    else (on the payoff) an unprepared **appoggiatura** — struck as a non-chord
+    tone and resolving down by step at the mid-bar pulse. The returned voicing is
+    still the resolved chord (so the next bar voice-leads — and prepares — from the
+    resolution)."""
     # Voicing wants root-first pcs for its doubling preferences; chord_pcs is
     # bass-first (equal unless inverted).
     pcs = ctx.chord.pitch_classes(ctx.scale) if ctx.chord else ctx.chord_pcs
@@ -61,19 +85,23 @@ def generate_pad(
                          chord=ctx.chord_sym,
                          role=role or ("chord-tone" if ctx.scale.contains(pitch) else "borrowed"))
 
-    susp = _suspension_pair(voicing, prev_voicing, ctx) if suspend else None
-    trace = f"pad: voicing {voicing} cost {cost:.1f}"
-    if susp is None:
-        events = [note(start, bar_len, pitch, "") for pitch in voicing]
-        return events, voicing, trace
+    ornament = None  # (target, dissonant, role): a suspension if preparable, else an appoggiatura
+    if suspend and (pair := _suspension_pair(voicing, prev_voicing, ctx)) is not None:
+        ornament = (*pair, "suspension")
+    if ornament is None and appoggiatura and (pair := _appoggiatura_pair(voicing, ctx, cfg.hi)) is not None:
+        ornament = (*pair, "appoggiatura")
 
-    target, suspended = susp
+    trace = f"pad: voicing {voicing} cost {cost:.1f}"
+    if ornament is None:
+        return [note(start, bar_len, pitch, "") for pitch in voicing], voicing, trace
+
+    target, dissonant, role = ornament
     res_at = meter.pulse_quarters * max(1, meter.pulses // 2)  # resolve on the mid-bar pulse
     events = []
     for pitch in voicing:
         if pitch == target:
-            events.append(note(start, res_at, suspended, "suspension"))
+            events.append(note(start, res_at, dissonant, role))
             events.append(note(start + res_at, bar_len - res_at, target, "resolution"))
         else:
             events.append(note(start, bar_len, pitch, ""))
-    return events, voicing, trace + f" │ {pitch_name(suspended)}–{pitch_name(target)} suspension"
+    return events, voicing, trace + f" │ {pitch_name(dissonant)}–{pitch_name(target)} {role}"

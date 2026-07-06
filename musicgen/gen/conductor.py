@@ -506,7 +506,8 @@ class MusicEngine:
         if "pad" in layers:
             pad_events, voicing, pad_trace = generate_pad(
                 ctx, cfg.meter, params, state.prev_voicing, cfg.voicing,
-                suspend=directive is not None and directive.suspend)
+                suspend=directive is not None and directive.suspend,
+                appoggiatura=directive is not None and directive.appoggiatura)
             events.extend(pad_events)
             state.prev_voicing = voicing
             trace.append(pad_trace)
