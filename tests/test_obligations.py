@@ -201,11 +201,24 @@ def test_dramaturg_deploys_resolving_suspensions():
     assert lint(raw, contexts, METER, stage="pre") == []      # and every one discharges
 
 
+def test_dramaturg_deploys_terminating_pedal():
+    results = _dramaturg_render(earned=True)      # 4 withholding phrases: the pedal engages
+    raw = [ev for r in results for ev in r.raw_events]
+    contexts = [r.context for r in results]
+    pedals = [ev for ev in raw if ev.role == "pedal"]
+    assert pedals, "sustained withholding should engage a dominant pedal"
+    assert len({ev.pitch for ev in pedals}) == 1, "a pedal point holds one fixed pitch"
+    assert lint(raw, contexts, METER, stage="pre") == []      # and it terminates at a cadence
+
+
 def test_earned_dissonance_off_is_inert():
     on = [ev for r in _dramaturg_render(earned=True) for ev in r.raw_events]
     off = [ev for r in _dramaturg_render(earned=False) for ev in r.raw_events]
-    assert not any(ev.role in ("suspension", "resolution") for ev in off)
-    # surgical: the pad uses no RNG, so every non-pad layer is byte-identical
+    assert not any(ev.role in ("suspension", "resolution", "pedal") for ev in off)
+    # surgical: earned dissonance touches only the pad (suspensions) and the bass
+    # (pedals); every layer on an independent RNG stream is byte-identical, since
+    # per-bar streams mean a changed bar can't perturb any other.
     key = lambda e: (e.start, e.layer, e.pitch, e.dur, e.velocity, e.role)  # noqa: E731
-    assert (sorted(key(e) for e in on if e.layer != "pad")
-            == sorted(key(e) for e in off if e.layer != "pad"))
+    for layer in ("melody", "arp", "perc"):
+        assert (sorted(key(e) for e in on if e.layer == layer)
+                == sorted(key(e) for e in off if e.layer == layer)), layer

@@ -516,6 +516,7 @@ class MusicEngine:
                 next_bass_pc=upcoming.bass_pc(next_scale),
                 cfg=cfg.bass,
                 rng=self.seeder.stream("bass", bar),
+                pedal_degree=directive.pedal if directive is not None else 0,
             )
             events.extend(bass_events)
             state.prev_bass_root = root

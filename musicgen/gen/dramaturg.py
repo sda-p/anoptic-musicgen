@@ -47,6 +47,8 @@ from dataclasses import dataclass, field, replace
 
 from musicgen.gen.structure import PhrasePos
 
+_DOMINANT_PEDAL = 5  # scale degree the withholding pedal holds (the dominant — maximal cadential pull)
+
 
 @dataclass(frozen=True)
 class DramaturgConfig:
@@ -95,6 +97,7 @@ class Directive:
     escalation: int = 0                 # the escalation rung (drives intensify; also traced)
     payoff: float = 0.0                 # >0 on a spend bar: the graded resolution magnitude
     suspend: bool = False               # applied (M14): request a prepared pad suspension this bar
+    pedal: int = 0                      # applied (M14): scale degree the bass pedals (0 none; 5 dominant)
     note: str = ""
 
 
@@ -177,12 +180,14 @@ class Dramaturg:
         ledger.peak_tension = max(ledger.peak_tension, ledger.prev_base_tension or 0.0)
         ledger.phrase_cadence[pos.phrase] = "deceptive"  # ration: refuse the tonic
         cap, lock, intensify, rung = self._withholding(ledger)
-        extra = (f" [hold {'+'.join(lock)}, melody -{cap}st, push +{round(intensify * 100)}%]"
-                 if rung >= 1 else "")
+        pedal = _DOMINANT_PEDAL if rung >= 1 and self.cfg.earned_dissonance else 0  # dominant pedal anchors the hold
+        extra = (f" [hold {'+'.join(lock)}{', dom pedal' if pedal else ''}, melody -{cap}st, "
+                 f"push +{round(intensify * 100)}%]" if rung >= 1 else "")
         ledger.last_note = (f"dramaturg: WITHHOLD phrase {pos.phrase} -> deceptive, circle tonic "
                             f"(debt {self._debt(ledger)}, rung {rung}){extra}")
         return Directive(cadence="deceptive", withhold_root_tonic=True, escalation=rung,
-                         register_cap=cap, lock_layers=lock, intensify=intensify, note=ledger.last_note)
+                         register_cap=cap, lock_layers=lock, intensify=intensify, pedal=pedal,
+                         note=ledger.last_note)
 
     def _spend(self, ledger: Ledger, pos: PhrasePos) -> Directive:
         magnitude = spend_magnitude(ledger, self.cfg)
@@ -205,5 +210,6 @@ class Dramaturg:
         if ledger.withholding_phrases <= 0:
             return Directive()
         cap, lock, intensify, rung = self._withholding(ledger)
+        pedal = _DOMINANT_PEDAL if rung >= 1 and self.cfg.earned_dissonance else 0
         return Directive(withhold_root_tonic=True, escalation=rung,
-                         register_cap=cap, lock_layers=lock, intensify=intensify)
+                         register_cap=cap, lock_layers=lock, intensify=intensify, pedal=pedal)

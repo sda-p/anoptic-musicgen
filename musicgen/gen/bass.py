@@ -13,6 +13,7 @@ import random
 from dataclasses import dataclass
 
 from musicgen.ir import HarmonicContext, Meter, MusicalParams, NoteEvent
+from musicgen.theory.pitch import pitch_name
 from musicgen.theory.scales import Scale
 
 
@@ -48,8 +49,12 @@ def generate_bass(
     next_bass_pc: int | None,
     cfg: BassConfig,
     rng: random.Random,
+    pedal_degree: int = 0,
 ) -> tuple[list[NoteEvent], int, str]:
-    """One bar of bass. Returns (events, this bar's root pitch, trace)."""
+    """One bar of bass. Returns (events, this bar's root pitch, trace). When
+    `pedal_degree` is set the bass abandons the walk and holds that scale degree
+    (the dramaturg's withholding pedal, §5.8/M14) — re-articulated per bar on one
+    fixed pitch, so the linter reads a contiguous run that must end at a cadence."""
     bar_len = meter.bar_quarters
     start = ctx.bar * bar_len
     root_pc = ctx.chord_pcs[0]
@@ -60,6 +65,12 @@ def generate_bass(
     def note(t: float, d: float, p: int, role: str) -> NoteEvent:
         return NoteEvent(t, d, p, velocity, "bass",
                          degree=ctx.scale.degree_of(p), chord=ctx.chord_sym, role=role)
+
+    if pedal_degree:
+        # Nearest instance to the previous root on entry, then to itself — so once
+        # the pedal locks in it stays on one pitch (a genuine held pedal point).
+        pedal = _nearest_instance(ctx.scale.pitch_at(pedal_degree, 4) % 12, near, cfg.lo, cfg.hi)
+        return [note(start, bar_len, pedal, "pedal")], pedal, f"bass: pedal {pitch_name(pedal)} (^{pedal_degree})"
 
     approach: NoteEvent | None = None
     trace_bits = [f"root {root}"]
