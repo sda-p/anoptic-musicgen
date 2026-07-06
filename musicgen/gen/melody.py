@@ -4,6 +4,10 @@ Each phrase owns one Motif (a rhythm cell from the roughness engine plus a
 contour realized as diatonic offsets). Bars realize sentence-form variants of
 it — statement, sequence, development ops, an ornamented pre-cadence drive,
 and a cadence formula that converges on a policy-appropriate target degree.
+A persistent signature (M15/M17) is staged *positionally* on top of that plan:
+one signature event per phrase at the continuation onset while it matures, and
+on the payoff the whole phrase develops the signature into a faithful statement
+fused with the cadence (see generate_melody).
 
 Pitch selection is constraint-first, never a free walk: strong beats snap to
 chord tones, weak beats move by scale steps, leaps beyond a P4 recover by an
@@ -17,7 +21,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
-from musicgen.gen.motif import realize_faithful
+from musicgen.gen.motif import realize_cadential, realize_faithful
 from musicgen.gen.rhythm import rough_cell
 from musicgen.gen.structure import PhrasePos
 from musicgen.ir import GRID, HarmonicContext, Meter, MusicalParams, NoteEvent
@@ -70,6 +74,50 @@ def make_motif(rng: random.Random, density: float, roughness: float, cfg: Melody
     shape = rng.choice(CONTOUR_SHAPES)
     span = rng.randint(cfg.span_min, cfg.span_max)
     return Motif(rhythm, _contour_offsets(shape, len(rhythm), span), shape)
+
+
+def _markedness(m: Motif) -> int:
+    """How *distinctive* a cell is as an identity (§5.5, M15): a signature must be
+    recognizable when it returns, which needs profile — not an undifferentiated
+    pulse or a plain scale walk. One point each for motto length (4–7 notes),
+    rhythmic differentiation (≥ 2 durations), a leap, a step, and a change of
+    direction. `recognizability` measures whether a shape *survived* realization;
+    this measures whether there is a shape worth surviving."""
+    deltas = [b - a for a, b in zip(m.contour, m.contour[1:])]
+    turns = [d for d in deltas if d]
+    return sum((
+        4 <= len(m.rhythm) <= 7,
+        len({d for _, d in m.rhythm}) >= 2,
+        any(abs(d) >= 2 for d in deltas),
+        any(abs(d) <= 1 for d in deltas),
+        any((a > 0) != (b > 0) for a, b in zip(turns, turns[1:])),
+    ))
+
+
+def make_signature(rng: random.Random, density: float, roughness: float,
+                   cfg: MelodyConfig, slots: int = 16, attempts: int = 8) -> Motif:
+    """A signature-grade motif (§5.5, M15): drawn like `make_motif` but from params
+    clamped into the motto zone (a floor of rhythmic character even under a flat
+    affect; a ceiling on density — a spray of 16ths doesn't gestalt), taking the
+    most *marked* of `attempts` candidates, then repairing what the best draw still
+    lacks: the tail merges into a held ending until the rhythm has profile and motto
+    length, and a flat or monotone contour gets its midpoint lifted (creating the
+    leap-and-turn). Deterministic for a given rng stream."""
+    density = min(max(density, 0.5), 0.75)
+    roughness = max(roughness, 0.3)
+    m = max((make_motif(rng, density, roughness, cfg, slots=slots) for _ in range(attempts)),
+            key=_markedness)
+    while len(m.rhythm) > 7 or (len(m.rhythm) > 1 and len({d for _, d in m.rhythm}) < 2):
+        (s1, _), (s2, d2) = m.rhythm[-2], m.rhythm[-1]
+        m = Motif(m.rhythm[:-2] + ((s1, s2 + d2 - s1),), m.contour[:-1], m.shape)
+    deltas = [b - a for a, b in zip(m.contour, m.contour[1:])]
+    turns = [d for d in deltas if d]
+    if not (any(abs(d) >= 2 for d in deltas)
+            and any((a > 0) != (b > 0) for a, b in zip(turns, turns[1:]))):
+        contour = list(m.contour)
+        contour[len(contour) // 2] += 2
+        m = Motif(m.rhythm, tuple(contour), m.shape)
+    return m
 
 
 # --- variation operators -----------------------------------------------------
@@ -204,8 +252,22 @@ def _introduce(motif, ctx, mscale, params, state, lo, hi, strong):
     placed, anchor = _place(frag, ctx, mscale, params, state, lo, hi, strong)
     if placed:  # nudge the final note to the nearest 2̂/7̂ — the unresolved, hanging tail
         slot, dur, last = placed[-1]
+        prev = placed[-2][2] if len(placed) > 1 else \
+            (state.prev_pitch if state.prev_pitch is not None else last)
+        prev2 = placed[-3][2] if len(placed) > 2 else state.prev_pitch
         unstable_pcs = (ctx.scale.pitch_at(2, 4) % 12, ctx.scale.pitch_at(7, 4) % 12)
-        placed[-1] = (slot, dur, _nearest_pc_pitch(unstable_pcs, last, lo, hi))
+        cands = [p for pc in set(unstable_pcs) for p in range(lo + (pc - lo) % 12, hi + 1, 12)]
+        # The tail must hang, not break the line: if _place leapt into the
+        # penultimate note, its final note IS that leap's recovery, so the nudge
+        # may only land an unstable pitch that recovers too (an opposite step) —
+        # otherwise it stands down. Elsewhere it just may not leap from prev.
+        if prev2 is not None and abs(prev - prev2) > 5:
+            direction = -1 if prev > prev2 else 1
+            pool = [p for p in cands if 1 <= (p - prev) * direction <= 2]
+        else:
+            pool = [p for p in cands if abs(p - prev) <= 5] or cands
+        if pool:
+            placed[-1] = (slot, dur, min(pool, key=lambda p: (abs(p - last), p)))
     return placed, anchor, "introduced"
 
 
@@ -221,42 +283,67 @@ def generate_melody(
     cfg: MelodyConfig,
     rng: random.Random,
     lifecycle: str = "",
+    signature: Motif | None = None,
 ) -> tuple[list[NoteEvent], MelodyState, str]:
-    """One bar of melody. `lifecycle` selects the motif realization (M15):
-    "completed" — the faithful signature statement; "introduced" — a fragmentary
-    glimpse ending unstably; "developed"/"" — the disguised constraint-first
-    development (byte-identical to the disposable path when "")."""
+    """One bar of melody. `lifecycle` stages the persistent `signature` (M15/M17)
+    *positionally* within the phrase — the phrase keeps its own disposable `motif`,
+    and the signature lands as an event within it, not as wallpaper:
+
+    - "" — plain sentence form on `motif` (byte-identical to the disposable path).
+    - "introduced" / "developed" — one signature event at the continuation onset
+      (pos == bars//2): a fragmentary glimpse ending unstably, or the full cell in
+      disguise (constraint-first). Every other bar: sentence form on `motif`.
+    - "stated" — as above, but the event is the faithful recurrence of an authored
+      signature (M17 secondary colour).
+    - "completed" — the payoff: sentence form develops the *signature*, driving
+      into a faithful statement fused with the cadence bar (the arrival IS the
+      statement); the drive never rests."""
     lo = params.register_center - cfg.range_semitones
     hi = params.register_center + cfg.range_semitones
-    faithful = lifecycle == "completed"
+    sig = signature if signature is not None else motif
+    sig_event = lifecycle in ("introduced", "developed", "stated") and pos.pos == pos.bars // 2
 
     if pos.slot == "cadence" and ctx.cadence_policy:
+        if lifecycle == "completed":
+            return _cadence_statement(sig, ctx, meter, params, state, lo, hi)
         return _cadence_bar(ctx, meter, params, state, lo, hi, rng)
 
     rest_prob = max(0.0, cfg.bar_rest_max - params.note_density * 0.4)
-    if not faithful and pos.slot == "free" and rng.random() < rest_prob:
-        return [], state, "melody: rest bar"  # a completed statement never rests
+    if (lifecycle != "completed" and not sig_event and pos.slot == "free"
+            and rng.random() < rest_prob):
+        return [], state, "melody: rest bar"  # signature events and the payoff drive never rest
 
     mscale = ctx.chord.scale_for(ctx.scale) if ctx.chord else ctx.scale
     strong = set(meter.strong_slots())
+    faithful = False
 
-    if faithful:
-        # Signature-faithful realization (§5.5, M15): the whole cell transposed to
-        # fit, contour intact — the completed statement the ear recognizes. It
-        # connects to the previous pitch so successive statements don't leap.
-        placed = realize_faithful(motif, mscale, ctx.chord_pcs, lo, hi, strong, near=state.prev_pitch)
-        anchor, op = (placed[0][2] if placed else params.register_center), "faithful"
-    elif lifecycle == "introduced":
-        placed, anchor, op = _introduce(motif, ctx, mscale, params, state, lo, hi, strong)
+    if lifecycle == "completed":
+        # Payoff drive (§5.5, M15): the phrase develops the signature itself,
+        # constraint-first — bending to the harmony — so the faithful cadential
+        # statement lands as the destination, not as the seventh repetition.
+        variant, base_op = phrase_variant(sig, pos.pos, rng, meter.slots)
+        placed, anchor = _place(variant, ctx, mscale, params, state, lo, hi, strong)
+        op, shape = f"drive {base_op}", sig.shape
+    elif sig_event and lifecycle == "introduced":
+        placed, anchor, op = _introduce(sig, ctx, mscale, params, state, lo, hi, strong)
+        shape = sig.shape
+    elif sig_event and lifecycle == "developed":
+        placed, anchor = _place(sig, ctx, mscale, params, state, lo, hi, strong)
+        op, shape = "signature disguised", sig.shape
+    elif sig_event:  # "stated": the faithful recurrence of an authored signature (M17)
+        placed = realize_faithful(sig, mscale, ctx.chord_pcs, lo, hi, strong, near=state.prev_pitch)
+        anchor = placed[0][2] if placed else params.register_center
+        op, shape, faithful = "signature faithful", sig.shape, True
     else:
         variant, op = phrase_variant(motif, pos.pos, rng, meter.slots)
         placed, anchor = _place(variant, ctx, mscale, params, state, lo, hi, strong)
+        shape = motif.shape
 
     bar_start = ctx.bar * meter.bar_quarters
     events: list[NoteEvent] = []
     for i, (slot, dur_slots, pitch) in enumerate(placed):
         if faithful:
-            # a completed signature statement is licensed as a whole — its
+            # a faithful signature statement is licensed as a whole — its
             # intervals are the identity (verified by recognizability), so the
             # note-level melodic heuristics do not apply (see verify._lint_melody).
             role = "motif"
@@ -274,7 +361,50 @@ def generate_melody(
         ))
 
     new_state = MelodyState(prev_pitch=placed[-1][2] if placed else state.prev_pitch, prev_anchor=anchor)
-    return events, new_state, f"melody: {op} ({motif.shape}) anchor {pitch_name(anchor)} n={len(placed)}"
+    return events, new_state, f"melody: {op} ({shape}) anchor {pitch_name(anchor)} n={len(placed)}"
+
+
+def _cadence_target_pcs(ctx: HarmonicContext) -> tuple[int, ...]:
+    """Policy-appropriate cadence-target pitch classes, filtered to chord members
+    (fallback to the chord itself, e.g. a borrowed bVI)."""
+    degree_pcs = tuple(
+        ctx.scale.pitch_at(d, 4) % 12
+        for d in CADENCE_TARGET_DEGREES[ctx.cadence_policy]
+        if ctx.scale.pitch_at(d, 4) % 12 in ctx.chord_pcs
+    )
+    return degree_pcs or tuple(ctx.chord_pcs)
+
+
+def _cadence_statement(
+    motif: Motif,
+    ctx: HarmonicContext,
+    meter: Meter,
+    params: MusicalParams,
+    state: MelodyState,
+    lo: int,
+    hi: int,
+) -> tuple[list[NoteEvent], MelodyState, str]:
+    """The completed signature fused with the cadence (§5.5, M15): the whole cell,
+    contour intact, transposed so its final note IS the cadence target, held to the
+    bar end under a crescendo — the payoff states the signature at the arrival,
+    a flourish that resolves, instead of a generic two-note approach after a phrase
+    of noodling. Licensed as a whole (role "motif")."""
+    placed = realize_cadential(motif, ctx.scale, _cadence_target_pcs(ctx), lo, hi,
+                               near=state.prev_pitch, slots=meter.slots)
+    bar_start = ctx.bar * meter.bar_quarters
+    n = len(placed)
+    events = [
+        NoteEvent(
+            bar_start + slot * GRID, dur * GRID, pitch,
+            _velocity(params, -2 + round(8 * i / (n - 1)) if n > 1 else 6),
+            "melody", degree=ctx.scale.degree_of(pitch), chord=ctx.chord_sym, role="motif",
+        )
+        for i, (slot, dur, pitch) in enumerate(placed)
+    ]
+    target = placed[-1][2]
+    new_state = MelodyState(prev_pitch=target, prev_anchor=target)
+    names = " -> ".join(pitch_name(e.pitch) for e in events)
+    return events, new_state, f"melody: cadence statement ({ctx.cadence_policy}) {names}"
 
 
 def _cadence_bar(
@@ -289,12 +419,7 @@ def _cadence_bar(
     """Approach + held target: an appoggiatura-style formula converging on a
     chord tone appropriate to the cadence policy (tendency-tone resolution)."""
     scale = ctx.scale
-    degree_pcs = tuple(
-        scale.pitch_at(d, 4) % 12
-        for d in CADENCE_TARGET_DEGREES[ctx.cadence_policy]
-        if scale.pitch_at(d, 4) % 12 in ctx.chord_pcs
-    )
-    candidate_pcs = degree_pcs or tuple(ctx.chord_pcs)  # fallback: e.g. borrowed bVI
+    candidate_pcs = _cadence_target_pcs(ctx)
     center = state.prev_pitch if state.prev_pitch is not None else params.register_center
 
     # Walk from where the line is toward the cadence target: a step first,

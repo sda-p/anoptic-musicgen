@@ -30,7 +30,9 @@ from musicgen.gen import structure
 from musicgen.gen.arp import ArpConfig, PATTERNS as ARP_PATTERNS, generate_arp
 from musicgen.gen.bass import BassConfig, generate_bass
 from musicgen.gen.dramaturg import Dramaturg, DramaturgConfig, Ledger, spend_magnitude
-from musicgen.gen.melody import MelodyConfig, MelodyState, Motif, generate_melody, make_motif
+from musicgen.gen.melody import (
+    MelodyConfig, MelodyState, Motif, generate_melody, make_motif, make_signature,
+)
 from musicgen.gen.motif import MotifLifecycle
 from musicgen.gen.signatures import MotifDirector, SignatureMotif
 from musicgen.gen.pad import generate_pad
@@ -112,6 +114,7 @@ class ConductorState:
     motif_lifecycle: MotifLifecycle | None = None  # persistent signature (M15; None when disabled)
     motif_director: MotifDirector | None = None    # authored-signature selection (M17; None when no library)
     pending_signature: Motif | None = None         # the signature to state this phrase, or None
+    pending_lifecycle: str = ""                    # its staging: "completed" (landmark payoff) | "stated"
     requested_motif: str = ""                      # the game's request_motif(tag), pending until stated
     ledger: Ledger = field(default_factory=Ledger)  # dramaturg state (unused when disabled)
     last_fill: bool = False
@@ -473,19 +476,6 @@ class MusicEngine:
             directive = self.dramaturg.on_bar(state.ledger, self.affect.tension, pos)
             dramaturg_note = directive.note
 
-        # Motif lifecycle (§5.5, M15): a persistent signature advances at each
-        # phrase boundary; its completed (faithful) statement is gated on a spend.
-        lifecycle_state = ""
-        if self._lifecycle_on:
-            if state.motif_lifecycle is None:
-                state.motif_lifecycle = MotifLifecycle(make_motif(
-                    self.seeder.stream("signature"), cfg.params.note_density,
-                    cfg.params.roughness, cfg.melody, slots=cfg.meter.slots))
-            if pos.pos == 0:
-                spend = directive is not None and directive.payoff > 0
-                state.motif_lifecycle.advance(spend, pos.phrase)
-            lifecycle_state = state.motif_lifecycle.state
-
         if (cfg.wander_phrases is not None and pos.pos == 0 and bar > 0
                 and state.pending_key is None and state.modulation is None
                 and pos.phrase - state.last_key_phrase >= cfg.wander_phrases):
@@ -531,6 +521,22 @@ class MusicEngine:
                     lyr for lyr in params.layers if lyr not in directive.lock_layers))
             if directive.intensify:
                 params = self._escalate(params, directive.intensify)
+
+        # Motif lifecycle (§5.5, M15): a persistent signature advances at each
+        # phrase boundary; the faithful statement is gated on a spend, fusing with
+        # that phrase's cadence. Built once, down here so it reflects the LIVE
+        # mapped params (the opening affect) — not the static-path defaults, which
+        # froze it featureless — and marked enough to be recognizable when it lands.
+        lifecycle_state = ""
+        if self._lifecycle_on:
+            if state.motif_lifecycle is None:
+                state.motif_lifecycle = MotifLifecycle(make_signature(
+                    self.seeder.stream("signature"), params.note_density,
+                    params.roughness, cfg.melody, slots=cfg.meter.slots))
+            if pos.pos == 0:
+                spend = directive is not None and directive.payoff > 0
+                state.motif_lifecycle.advance(spend, pos.phrase)
+            lifecycle_state = state.motif_lifecycle.state
 
         while len(state.chord_queue) < 2:
             next_needed = state.chord_queue[-1][0] + 1 if state.chord_queue else bar
@@ -584,6 +590,11 @@ class MusicEngine:
             if sel is not None:
                 sig, _transform, motif_t = sel
                 state.pending_signature = motif_t
+                # A landmark gets the payoff staging (the phrase develops it into a
+                # cadence-fused faithful statement); a secondary colour recurs as one
+                # faithful statement at the signature slot.
+                state.pending_lifecycle = ("completed" if sig.importance >= _LANDMARK_IMPORTANCE
+                                           else "stated")
                 state.motif_director.observe(sig.tag, pos.bars)
                 if sig.tag == state.requested_motif:
                     state.requested_motif = ""  # the game's request has been honoured
@@ -591,14 +602,12 @@ class MusicEngine:
                 # A landmark lands as an *arrival*: force this phrase's cadence to
                 # authentic (the M14 cadential suspension/appoggiatura follow, as the
                 # overlay keys off phrase_cadence) and cash whatever tension-debt had
-                # accrued — the landmark statement *is* the payoff (§5.5/§5.8).
+                # accrued — the landmark statement *is* the payoff (§5.5/§5.8). It
+                # deliberately leaves the per-bar withholding signals (pedal,
+                # tonic-circling) untouched, so they run on undisturbed to the
+                # now-authentic cadence and terminate cleanly; if tension stays high
+                # the buildup simply resumes after the arrival.
                 if sig.importance >= _LANDMARK_IMPORTANCE and self._dramaturg_on:
-                    # A landmark lands as an arrival: force this phrase to an authentic
-                    # cadence (the M14 cadential suspension/appoggiatura follow) and cash
-                    # the accrued *debt* — the payoff. It deliberately leaves the per-bar
-                    # withholding signals (pedal, tonic-circling) untouched, so they run
-                    # on undisturbed to the now-authentic cadence and terminate cleanly;
-                    # if tension stays high the buildup simply resumes after the arrival.
                     led = state.ledger
                     led.last_spend = spend_magnitude(led, self.dramaturg.cfg)
                     led.bars_since_authentic = led.deceptions = 0
@@ -634,16 +643,22 @@ class MusicEngine:
                 # on the spend (register_cap is 0 then) — the audible bloom
                 mel_cfg = replace(cfg.melody, range_semitones=max(
                     _MIN_MELODY_RANGE, cfg.melody.range_semitones - directive.register_cap))
-            # An authored signature (if the director launched one this phrase) is
-            # stated faithfully — reusing the M15 completed path; otherwise the
-            # generated lifecycle motif (or the disposable per-phrase motif).
+            # The signature woven into this phrase (M15/M17): an authored selection
+            # takes precedence (a landmark as the payoff, a colour as one faithful
+            # statement); otherwise the lifecycle signature in its current state.
+            # Either way the phrase keeps its own disposable motif — the signature
+            # is an event *within* the phrase, not a substitute for its material.
             sig_motif = state.pending_signature if self._director_on else None
-            mel_motif = sig_motif if sig_motif is not None else self._motif(pos.phrase, params)
-            mel_lifecycle = "completed" if sig_motif is not None else lifecycle_state
+            if sig_motif is not None:
+                signature, mel_lifecycle = sig_motif, state.pending_lifecycle
+            elif lifecycle_state:
+                signature, mel_lifecycle = state.motif_lifecycle.motif, lifecycle_state
+            else:
+                signature, mel_lifecycle = None, ""
             mel_events, mel_state, mel_trace = generate_melody(
-                ctx, cfg.meter, params, pos, mel_motif,
+                ctx, cfg.meter, params, pos, self._motif(pos.phrase, params),
                 state.melody, mel_cfg, self.seeder.stream("melody", bar),
-                lifecycle=mel_lifecycle,
+                lifecycle=mel_lifecycle, signature=signature,
             )
             events.extend(mel_events)
             state.melody = mel_state
@@ -690,10 +705,11 @@ class MusicEngine:
         return BarResult(bar, final, events, ctx, params, self.affect.as_tuple(), tempo_points, trace)
 
     def _motif(self, phrase: int, params: MusicalParams) -> Motif:
-        # With the lifecycle on, every phrase develops the one persistent signature
-        # (created in advance_bar); otherwise a fresh disposable motif per phrase.
-        if self._lifecycle_on and self.state.motif_lifecycle is not None:
-            return self.state.motif_lifecycle.motif
+        # A fresh disposable motif per phrase (§5.5) at the CURRENT mapped
+        # density/roughness — the phrase's own material. The persistent signature
+        # (M15) and authored signatures (M17) are woven into these phrases as
+        # events, never substituted for them: substituting the one frozen
+        # signature for every phrase was the M15 monoculture.
         if phrase not in self.state.motifs:
             self.state.motifs[phrase] = make_motif(
                 self.seeder.stream("motif", phrase),

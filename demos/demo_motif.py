@@ -77,17 +77,19 @@ def main() -> None:
             spend = any("SPEND" in t for t in r.trace)
             print(f"  phrase {r.bar // pb}: {state:11s}{'  <- payoff spend' if spend else ''}")
 
-    print(f"\ncompleted statement (phrase {lc.completed_phrase}) — recognizability across its bars:")
+    print(f"\ncompleted phrase {lc.completed_phrase} — the drive into the cadence-fused statement:")
     for r in (r for r in results if r.bar // pb == lc.completed_phrase):
-        mel = sorted((e for e in r.raw_events if e.role == "motif"), key=lambda e: e.start)
-        if mel:
-            mscale = r.context.chord.scale_for(r.context.scale)
-            recog = recognizability(lc.motif, [e.pitch for e in mel], mscale)
-            print(f"  bar {r.bar + 1} over {r.context.chord_sym:6s}: {recog:.2f}")
+        mel = next((t for t in r.trace if t.startswith("melody:")), "").split("│")[0].strip()
+        line = f"  bar {r.bar + 1} over {r.context.chord_sym:6s}: {mel}"
+        motif_notes = sorted((e for e in r.raw_events if e.role == "motif"), key=lambda e: e.start)
+        if motif_notes:
+            recog = recognizability(lc.motif, [e.pitch for e in motif_notes], r.context.scale)
+            line += f"  <- faithful statement (recognizability {recog:.2f})"
+        print(line)
 
     emit(results, meter, f"motif_lifecycle_s{args.seed}", args.out_dir,
          header=(f"M15 motif lifecycle │ seed {args.seed} │ introduced→developed→completed; "
-                 f"the faithful statement lands on the spend (phrase {lc.completed_phrase})\n"),
+                 f"the faithful statement fuses with the spend cadence (phrase {lc.completed_phrase})\n"),
          no_audio=args.no_audio, play=args.play)
 
 

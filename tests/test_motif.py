@@ -130,20 +130,58 @@ def test_lifecycle_completes_faithfully_on_the_spend():
     lc = eng.state.motif_lifecycle
     assert lc.completed_phrase is not None
     pb = eng.config.phrase_bars
-    completed = [e for r in results if r.bar // pb == lc.completed_phrase
-                 for e in r.raw_events if e.role == "motif"]
-    assert completed, "the completed statement is realized faithfully (motif-role notes)"
-    before = [e for r in results if r.bar // pb < lc.completed_phrase
-              for e in r.raw_events if e.role == "motif"]
-    assert not before, "earlier phrases develop the motif in disguise, not faithfully"
+    motif_bars = {r.bar for r in results for e in r.raw_events if e.role == "motif"}
+    cadence_bar = lc.completed_phrase * pb + pb - 1
+    # the faithful statement is a point event fused with the payoff cadence —
+    # not phrase-length wallpaper, and never in the disguised phrases before it.
+    assert motif_bars == {cadence_bar}
     ctxs = [r.context for r in results]
     assert lint([e for r in results for e in r.raw_events], ctxs, Meter(), stage="pre") == []
 
 
-def test_lifecycle_persists_one_signature():
+def test_completed_statement_fuses_with_the_cadence():
+    # the payoff states the signature AT the arrival: its final note is a cadence
+    # target held to the bar end, under a crescendo into the landing.
+    results, eng = _lifecycle_render(42)
+    lc = eng.state.motif_lifecycle
+    pb = eng.config.phrase_bars
+    cadence = next(r for r in results if r.bar == lc.completed_phrase * pb + pb - 1)
+    mel = sorted((e for e in cadence.raw_events if e.role == "motif"), key=lambda e: e.start)
+    assert len(mel) == len(lc.motif.rhythm)                    # the whole cell, once
+    landing = mel[-1]
+    assert landing.pitch % 12 in cadence.context.chord_pcs     # lands ON the arrival chord
+    bar_end = (cadence.bar + 1) * eng.config.meter.bar_quarters
+    assert abs(landing.end - bar_end) < 1e-9                   # held to the bar end
+    assert landing.velocity > mel[0].velocity                  # dynamic emphasis into the landing
+
+
+def test_payoff_phrase_is_not_verbatim_repetition():
+    # regression (the original M15 flaw): the spend phrase looped one faithful
+    # realization verbatim for every non-cadence bar. The drive bars must develop
+    # the signature, not photocopy it.
+    from collections import Counter  # noqa: PLC0415
+    for seed in (42, 7, 11):
+        results, eng = _lifecycle_render(seed)
+        lc = eng.state.motif_lifecycle
+        pb = eng.config.phrase_bars
+        seqs = []
+        for r in results:
+            if r.bar // pb != lc.completed_phrase or r.context.cadence_slot == "cadence":
+                continue
+            mel = sorted((e for e in r.raw_events if e.layer == "melody"), key=lambda e: e.start)
+            if mel:
+                seqs.append(tuple(e.pitch for e in mel))
+        assert len(seqs) >= 4, "the payoff drive should sound in most bars"
+        assert max(Counter(seqs).values()) <= len(seqs) // 2, \
+            f"seed {seed}: one pitch sequence dominates the payoff phrase"
+
+
+def test_lifecycle_weaves_signature_into_fresh_phrase_material():
     _, eng = _lifecycle_render(42)
     assert eng.state.motif_lifecycle is not None
-    assert not eng.state.motifs      # the disposable per-phrase cache is unused when lifecycle is on
+    # the phrase's own disposable motifs continue alongside the persistent
+    # signature (regression: the signature used to *replace* them — monoculture)
+    assert eng.state.motifs
 
 
 def test_lifecycle_off_plants_no_motif_notes():
@@ -176,15 +214,56 @@ def test_completed_statement_recognizable_in_render():
     assert scores and min(scores) >= 0.9
 
 
-def test_introduced_ends_on_unstable_degree():
+def test_introduced_glimpses_once_per_phrase():
+    # introduced = phrases 0–1: ONE fragmentary glimpse per phrase at the
+    # continuation onset, ending unstably (2̂/7̂) — the rest of the phrase is its
+    # own material, so the glimpse reads as an event, not sixteen bars of wallpaper.
     results, eng = _lifecycle_render(42)
     pb = eng.config.phrase_bars
     checked = 0
     for r in results:
-        if r.bar // pb >= 2 or r.context.cadence_slot == "cadence":
-            continue  # introduced = phrases 0–1; the cadence bar resolves, not fragmentary
+        if r.bar // pb >= 2 or r.bar % pb != pb // 2:
+            continue
         mel = sorted((e for e in r.raw_events if e.layer == "melody"), key=lambda e: e.start)
-        if mel:
-            checked += 1
-            assert r.context.scale.degree_of(mel[-1].pitch) in (2, 7)  # 2̂ / 7̂, left hanging
-    assert checked, "introduced phrases produced fragments to check"
+        assert mel, "the glimpse bar never rests"
+        checked += 1
+        assert r.context.scale.degree_of(mel[-1].pitch) in (2, 7)  # 2̂ / 7̂, left hanging
+    assert checked == 2, "one glimpse per introduced phrase"
+
+
+def test_idle_dramaturg_keeps_melodic_variety():
+    # regression (the original M15 flaw): with the dramaturg idle — tension in the
+    # dead band, never accruing, never spending — the lifecycle collapsed the whole
+    # piece onto one frozen cell. Idle phrases must keep near the rhythmic variety
+    # of the lifecycle-off path (fresh disposable motifs per phrase).
+    def idle_rhythms(motif_lifecycle):
+        cfg = EngineConfig(meter=Meter(), mapper=MappingTable(),
+                           dramaturg=DramaturgConfig(leniency=0.5, motif_lifecycle=motif_lifecycle))
+        eng = MusicEngine(seed=42, config=cfg)
+        eng.set_affect(valence=0.0, energy=0.7, tension=0.45)
+        results = [eng.advance_bar() for _ in range(6 * cfg.phrase_bars)]
+        rhythms = set()
+        for r in results:
+            mel = sorted((e for e in r.raw_events if e.layer == "melody"), key=lambda e: e.start)
+            if mel and r.context.cadence_slot != "cadence":
+                rhythms.add(tuple(round(e.start - r.bar * 4.0, 3) for e in mel))
+        return eng, rhythms
+
+    eng_on, on = idle_rhythms(True)
+    _, off = idle_rhythms(False)
+    assert eng_on.state.motif_lifecycle.state != "completed"   # idle never spends the payoff...
+    assert len(on) >= len(off) * 0.7                           # ...yet variety survives
+
+
+def test_make_signature_is_marked():
+    # a signature needs profile to be recognizable when it returns — even drawn
+    # from the flattest possible params (density 0.5, roughness 0.0).
+    from musicgen.gen.melody import make_signature  # noqa: PLC0415
+    for seed in range(8):
+        m = make_signature(random.Random(seed), 0.5, 0.0, MelodyConfig())
+        deltas = [b - a for a, b in zip(m.contour, m.contour[1:])]
+        turns = [d for d in deltas if d]
+        assert 3 <= len(m.rhythm) <= 7                          # motto length
+        assert len({d for _, d in m.rhythm}) >= 2               # rhythmic differentiation
+        assert any(abs(d) >= 2 for d in deltas)                 # a leap...
+        assert any((a > 0) != (b > 0) for a, b in zip(turns, turns[1:]))  # ...and a turn
