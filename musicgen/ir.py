@@ -136,8 +136,8 @@ class HarmonicContext:
     cadence_slot: str = ""    # "" | "pre-cadence" | "cadence"
     cadence_policy: str = ""  # "" | "authentic" | "half" | "deceptive"
     modulation: str = ""      # key-change annotation ("pivot ≡ ii of G ionian", ...)
-    obligation: str = ""      # M14 structural-dissonance obligation (§5.8): "" | "borrowed"
-    #                           | "tonicize:N" — verify._lint_obligations checks it discharges
+    obligation: str = ""      # M14 harmonic obligation (§5.8): "" | "tonicize:N" — a secondary
+    #                           dominant that verify._lint_obligations checks resolves to degree N
 
 
 @dataclass

@@ -37,7 +37,7 @@ from musicgen.ir import LAYER_NAMES, HarmonicContext, Meter, MusicalParams, Note
 from musicgen.modifiers import apply_chain, default_chains
 from musicgen.rng import Seeder
 from musicgen.theory.chords import Chord
-from musicgen.theory.harmony import HarmonyConfig, next_chord
+from musicgen.theory.harmony import CADENCE_TARGET, HarmonyConfig, next_chord
 from musicgen.theory.modulation import Pivot, fifths_between, find_pivots
 from musicgen.theory.pitch import name_to_midi
 from musicgen.theory.scales import Scale
@@ -264,9 +264,31 @@ class MusicEngine:
             cfg=cfg.harmony,
             rng=self.seeder.stream("harmony", bar),
             suppress_tonic=self._dramaturg_on and self.state.ledger.suppress_tonic,
+            tonicize=self._tonicize_target(pos),
         )
         self.state.prev_chord = chord
         return bar, chord, why
+
+    def _tonicize_target(self, pos: structure.PhrasePos) -> int:
+        """Secondary-dominant deployment (§5.8, M14): at a sustained withholding
+        phrase's pre-cadence, tonicize the deceptive target (vi) with an applied
+        dominant — a chromatic push that resolves at the cadence next bar. 0 when
+        not withholding, earned dissonance is off, or vi is not a stable target."""
+        if not (self._dramaturg_on and self.dramaturg.cfg.earned_dissonance and pos.slot == "pre-cadence"):
+            return 0
+        ledger = self.state.ledger
+        if ledger.phrase_cadence.get(pos.phrase) != "deceptive":
+            return 0
+        rung = ledger.withholding_phrases // max(1, self.dramaturg.cfg.escalate_phrases)
+        if rung < 1:
+            return 0
+        target = CADENCE_TARGET["deceptive"]
+        # only apply a dominant to a stable (maj/min) target — in a dark mode where
+        # vi is diminished (e.g. dorian) it is no tonic worth tonicizing. Triad
+        # quality is a function of the mode alone, so any tonic reads it.
+        if Chord(target).quality(Scale(0, self.state.current_mode)) not in ("maj", "min"):
+            return 0
+        return target
 
     def _plan_modulation(self, pivot_bar: int, target: int, *, aligned: bool) -> ModulationPlan:
         """Commit a 3-bar modulation window starting at pivot_bar. The pivot
@@ -494,6 +516,7 @@ class MusicEngine:
             cadence_slot=slot,
             cadence_policy=self._policy(pos.phrase) if slot else "",
             modulation=mod_note,
+            obligation=f"tonicize:{chord.applied}" if chord.applied else "",
         )
 
         events: list[NoteEvent] = []

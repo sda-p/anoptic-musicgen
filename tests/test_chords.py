@@ -50,6 +50,26 @@ def test_extension_symbols():
     assert Chord(1, ("sus4",)).symbol(C_IONIAN) == "Isus4"
 
 
+def test_applied_dominants():
+    # secondary dominants: a major-minor 7th a fifth above the target, chromatic
+    v_of_vi = Chord.applied_dominant(6)   # E7 = E G# B D (G# is chromatic in C major)
+    assert v_of_vi.pitch_classes(C_IONIAN) == (4, 8, 11, 2)
+    assert v_of_vi.symbol(C_IONIAN) == "V7/vi"
+    assert v_of_vi.function == "D"        # functions as a dominant, not its nominal degree
+    assert v_of_vi.applied == 6
+    v_of_V = Chord.applied_dominant(5)    # D7 = D F# A C
+    assert v_of_V.pitch_classes(C_IONIAN) == (2, 6, 9, 0)
+    assert v_of_V.symbol(C_IONIAN) == "V7/V"
+    # triad-only form, and an uppercase target keeps its case (V/IV)
+    assert Chord.applied_dominant(4, seventh=False).pitch_classes(C_IONIAN) == (0, 4, 7)
+    assert Chord.applied_dominant(4).symbol(C_IONIAN) == "V7/IV"
+
+
+def test_applied_and_source_mode_mutually_exclusive():
+    with pytest.raises(ValueError):
+        Chord(3, applied=6, source_mode="aeolian")
+
+
 def test_borrowed_chords():
     iv = Chord(4, source_mode="aeolian")
     assert iv.pitch_classes(C_IONIAN) == (5, 8, 0)  # F Ab C

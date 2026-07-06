@@ -27,6 +27,7 @@ class Chord:
     extensions: tuple[str, ...] = ()
     inversion: int = 0
     source_mode: str | None = None  # realize from this mode (same tonic) when borrowed
+    applied: int = 0  # if set, this is the secondary dominant V/applied (chromatic; resolves to `applied`)
 
     def __post_init__(self) -> None:
         if not 1 <= self.degree <= 7:
@@ -38,12 +39,24 @@ class Chord:
             raise ValueError("sus2 and sus4 are mutually exclusive")
         if self.source_mode is not None and self.source_mode not in MODE_OFFSETS:
             raise ValueError(f"unknown source_mode {self.source_mode!r}")
+        if self.applied and not 1 <= self.applied <= 7:
+            raise ValueError(f"applied target must be 1..7, got {self.applied}")
+        if self.applied and self.source_mode is not None:
+            raise ValueError("applied (secondary dominant) and source_mode (borrowed) are mutually exclusive")
         if not 0 <= self.inversion < len(self.member_degrees()):
             raise ValueError(f"inversion {self.inversion} out of range for {len(self.member_degrees())} members")
 
+    @classmethod
+    def applied_dominant(cls, target: int, *, seventh: bool = True) -> "Chord":
+        """The secondary dominant V/target: a major-minor 7th a perfect fifth above
+        the target's root, realized chromatically (its raised third is the target's
+        leading tone). Resolves to `target`. The nominal `degree` is the diatonic
+        degree a fifth above the target (so inversion/annotation stay coherent)."""
+        return cls(degree=(target + 3) % 7 + 1, extensions=("7",) if seventh else (), applied=target)
+
     @property
     def function(self) -> str:
-        return FUNCTION_OF_DEGREE[self.degree]
+        return "D" if self.applied else FUNCTION_OF_DEGREE[self.degree]
 
     def member_degrees(self) -> tuple[int, ...]:
         """Chord members as (wrapping) scale degrees: root-first stacked thirds,
@@ -69,6 +82,13 @@ class Chord:
 
     def pitch_classes(self, context: Scale) -> tuple[int, ...]:
         """Member pitch classes, root first (ignores inversion)."""
+        if self.applied:
+            # a fifth above the target root, dominant quality by pc offsets (its
+            # major third is chromatic — the target's leading tone), not scale
+            # degrees, since the applied dominant leaves the diatonic collection.
+            root_pc = (context.pitch_at(self.applied, 4) + 7) % 12
+            offsets = (0, 4, 7, 10) if "7" in self.extensions else (0, 4, 7)
+            return tuple((root_pc + o) % 12 for o in offsets)
         source = self.scale_for(context)
         return tuple(source.pitch_at(d, 4) % 12 for d in self.member_degrees())
 
@@ -88,7 +108,13 @@ class Chord:
         return {(4, 7): "maj", (3, 7): "min", (3, 6): "dim", (4, 8): "aug"}.get((third, fifth), "?")
 
     def symbol(self, context: Scale) -> str:
-        """Roman-numeral symbol in context, e.g. "V7", "iv", "bVI", "I(add9)"."""
+        """Roman-numeral symbol in context, e.g. "V7", "iv", "bVI", "V7/vi"."""
+        if self.applied:
+            target = Chord(self.applied)
+            numeral = ROMAN[self.applied - 1]
+            if target.quality(context) in ("min", "dim"):
+                numeral = numeral.lower()
+            return f"V{'7' if '7' in self.extensions else ''}/{numeral}"
         root_pc = self.pitch_classes(context)[0]
         diatonic_pc = context.pitch_at(self.degree, 4) % 12
         prefix = {11: "b", 1: "#"}.get((root_pc - diatonic_pc) % 12, "")

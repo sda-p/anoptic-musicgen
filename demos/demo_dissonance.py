@@ -31,9 +31,11 @@ from musicgen.verify import lint
 
 ACCRUE_PHRASES = 4          # sustained high tension: bank debt, ornamenting each cadence
 SETTLE_PHRASES = 2          # release + settle: the spend cadence resolves its suspension
-HIGH = {"valence": -0.2, "energy": 0.70, "tension": 0.85}
+# a dark (aeolian) buildup: vi is a stable target, so the sustained hold also
+# tonicizes it with a secondary dominant — the full earned-dissonance palette.
+HIGH = {"valence": -0.5, "energy": 0.70, "tension": 0.85}
 RELEASE = {"valence": 0.50, "energy": 0.60, "tension": 0.08}
-_OBLIGATION_RULES = {"suspension", "suspension-prep", "pedal", "borrowed", "tonicize"}
+_OBLIGATION_RULES = {"suspension", "suspension-prep", "pedal", "appoggiatura", "tonicize"}
 
 
 def render(seed: int, earned: bool, leniency: float):
@@ -81,13 +83,14 @@ def main() -> None:
         susp = sum(1 for ev in raw if ev.role == "suspension")
         appog = sum(1 for ev in raw if ev.role == "appoggiatura" and ev.layer == "pad")
         pedal_bars = len({int(ev.start // Meter().bar_quarters) for ev in raw if ev.role == "pedal"})
+        secondary = sum(1 for r in results if r.context.chord and r.context.chord.applied)
         tag = "earned" if earned else "ambient"
         emit(results, Meter(), f"dissonance_{tag}_s{args.seed}", args.out_dir,
              header=(f"M14 earned dissonance │ seed {args.seed} │ leniency {args.leniency} │ "
                      f"{tag} ({'obligation-bearing dissonance' if earned else 'ambient colour only'})\n"),
              no_audio=args.no_audio, play=args.play)
         print(f"    {tag:8s}: {susp} suspension(s), {appog} cadential appoggiatura(s), "
-              f"{pedal_bars} bar(s) of dominant pedal")
+              f"{pedal_bars} bar(s) of dominant pedal, {secondary} secondary dominant(s)")
 
 
 if __name__ == "__main__":

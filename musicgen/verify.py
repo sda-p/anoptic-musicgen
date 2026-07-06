@@ -5,8 +5,8 @@ consistency, pre-modifier grid alignment. M1 rules: pad voicing quality
 (unison doubling, register, chord membership, voice movement), bass root and
 chord membership, cadence realization. M14 rules (§5.8): obligations-checking —
 a planted structural dissonance must discharge (a suspension resolves down by
-step, a pedal terminates at a cadence, a borrowed chord / secondary dominant
-returns). Value-range checks live in NoteEvent.__post_init__.
+step, a pedal terminates at a cadence, a secondary dominant resolves to its
+target). Value-range checks live in NoteEvent.__post_init__.
 
 stage="pre" lints generator output (grid-aligned); stage="post" lints after
 modifiers, which may move events off-grid.
@@ -214,6 +214,9 @@ def _lint_cadences(contexts, out) -> None:
     for ctx in contexts:
         if not ctx.cadence_slot or ctx.chord is None or not ctx.cadence_policy:
             continue
+        if ctx.chord.applied:
+            continue  # a secondary dominant is a valid (chromatic) pre-cadence; its
+            #           resolution is checked by the tonicize obligation instead
         table = CADENCE_DEGREES if ctx.cadence_slot == "cadence" else PRE_CADENCE_DEGREES
         allowed = table.get(ctx.cadence_policy)
         if allowed and ctx.chord.degree not in allowed:
@@ -235,8 +238,8 @@ def _lint_obligations(events, ctx_by_bar, meter, out) -> None:
       * a pad **appoggiatura** resolves down by step to a chord tone (the same
         obligation, unprepared — the payoff lean; melodic ones are exempt);
       * a **pedal** run (contiguous same-pitch bass) terminates at a cadence;
-      * a **context obligation** — a structural borrowing returns to diatonic
-        within two bars; a secondary dominant (`tonicize:N`) resolves to degree N.
+      * a **secondary dominant** (`ctx.obligation = "tonicize:N"`) resolves to
+        degree N at the next bar.
     """
     by_layer: dict[str, list[NoteEvent]] = {}
     for ev in events:
@@ -290,17 +293,8 @@ def _lint_obligations(events, ctx_by_bar, meter, out) -> None:
         i = j + 1
 
     for bar, ctx in ctx_by_bar.items():
-        obl = ctx.obligation
-        if not obl:
-            continue
-        if obl == "borrowed":
-            if not any((c := ctx_by_bar.get(b)) is not None
-                       and (c.chord is None or c.chord.source_mode is None)
-                       for b in (bar + 1, bar + 2)):
-                out.append(Violation("borrowed", bar,
-                    f"borrowed chord {ctx.chord_sym or '(?)'} does not return to diatonic within 2 bars"))
-        elif obl.startswith("tonicize:"):
-            target = int(obl.split(":", 1)[1])
+        if ctx.obligation.startswith("tonicize:"):
+            target = int(ctx.obligation.split(":", 1)[1])
             nxt = ctx_by_bar.get(bar + 1)
             if nxt is None or nxt.chord is None or nxt.chord.degree != target:
                 out.append(Violation("tonicize", bar,

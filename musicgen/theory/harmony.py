@@ -114,10 +114,13 @@ def next_chord(
     cfg: HarmonyConfig = HarmonyConfig(),
     rng: random.Random,
     suppress_tonic: bool = False,
+    tonicize: int = 0,
 ) -> tuple[Chord, str]:
     """One step of the functional walk. Returns (chord, trace). suppress_tonic
     biases a tonic-function bar away from I (toward vi/iii) — the dramaturg's
-    root-position-tonic withholding (§5.8); it never touches the cadence slots."""
+    root-position-tonic withholding (§5.8); it never touches the cadence slots.
+    tonicize (>0) makes a pre-cadence bar the secondary dominant V/tonicize —
+    the dramaturg's chromatic harmonic intensification, resolving at the cadence."""
     if piece_start:
         return Chord(1, extensions=_choose_extensions(1, tension, False, rng)), "piece start: establish tonic"
 
@@ -132,6 +135,8 @@ def next_chord(
         return chord, f"cadence ({cadence_policy}) -> degree {degree}"
 
     if slot == "pre-cadence":
+        if tonicize:  # the applied dominant resolves to the cadence target next bar
+            return Chord.applied_dominant(tonicize), f"pre-cadence ({cadence_policy}) -> secondary dominant V/{tonicize}"
         function = PRE_CADENCE_FUNCTION[cadence_policy]
         if function == "D":
             degree = 5 if rng.random() < 0.90 else 7

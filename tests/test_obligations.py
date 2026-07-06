@@ -98,28 +98,7 @@ def test_pedal_without_cadence_flagged():
     assert "pedal" in _rules(events, contexts)
 
 
-# --- context obligations: borrowing returns; a secondary dominant resolves ----
-
-def test_borrowed_returns_to_diatonic_clean():
-    contexts = [
-        HarmonicContext(bar=0, scale=SCALE, chord=Chord(6, source_mode="aeolian"),
-                        chord_sym="bVI", chord_pcs=(8, 0, 3), obligation="borrowed"),
-        HarmonicContext(bar=1, scale=SCALE, chord=Chord(4), chord_sym="IV", chord_pcs=(5, 9, 0)),
-    ]
-    assert lint([], contexts, METER, stage="pre") == []
-
-
-def test_borrowed_stuck_flagged():
-    contexts = [
-        HarmonicContext(bar=0, scale=SCALE, chord=Chord(6, source_mode="aeolian"),
-                        chord_sym="bVI", chord_pcs=(8, 0, 3), obligation="borrowed"),
-        HarmonicContext(bar=1, scale=SCALE, chord=Chord(4, source_mode="aeolian"),
-                        chord_sym="iv", chord_pcs=(5, 8, 0)),
-        HarmonicContext(bar=2, scale=SCALE, chord=Chord(7, source_mode="aeolian"),
-                        chord_sym="bVII", chord_pcs=(10, 2, 5)),
-    ]
-    assert "borrowed" in [v.rule for v in lint([], contexts, METER, stage="pre")]
-
+# --- secondary-dominant obligation (context-level): resolves to its target -----
 
 def test_secondary_dominant_resolves_clean():
     contexts = [
@@ -152,7 +131,7 @@ def test_no_obligations_is_silent():
     ]
     contexts = [_ctx(0, "I", (0, 4, 7))]
     rules = _rules(events, contexts)
-    assert not ({"suspension", "suspension-prep", "pedal", "borrowed", "tonicize"} & set(rules))
+    assert not ({"suspension", "suspension-prep", "pedal", "appoggiatura", "tonicize"} & set(rules))
 
 
 # --- pad realization: a prepared voice becomes a resolving suspension (M14.2) --
@@ -178,13 +157,13 @@ def test_suspension_pair_rejects_chromatic():
 
 # --- the dramaturg deploys suspensions over the cadences it controls ----------
 
-def _dramaturg_render(earned, phrases=4, seed=42):
+def _dramaturg_render(earned, phrases=4, seed=42, valence=-0.2):
     cfg = EngineConfig(meter=METER, mapper=MappingTable(),
                        dramaturg=DramaturgConfig(leniency=0.5, earned_dissonance=earned))
     eng = MusicEngine(seed=seed, config=cfg)
     pb = cfg.phrase_bars
     results = []
-    eng.set_affect(valence=-0.2, energy=0.7, tension=0.85)   # sustained high: accrue
+    eng.set_affect(valence=valence, energy=0.7, tension=0.85)   # sustained high: accrue
     for _ in range(phrases * pb):
         results.append(eng.advance_bar())
     eng.set_affect(valence=0.5, energy=0.6, tension=0.08)    # drop: release
@@ -249,6 +228,28 @@ def test_dramaturg_leans_appoggiatura_when_no_suspension():
     contexts = [r.context for r in results]
     assert [ev for ev in raw if ev.role == "appoggiatura" and ev.layer == "pad"]
     assert lint(raw, contexts, METER, stage="pre") == []
+
+
+# --- secondary dominants: chromatic harmonic intensification (M14.5) -----------
+
+def test_dramaturg_deploys_resolving_secondary_dominant():
+    # a dark (aeolian) buildup where vi is a stable target: sustained withholding
+    # tonicizes it with an applied dominant that resolves at the next-bar cadence.
+    results = _dramaturg_render(earned=True, valence=-0.5)
+    contexts = [r.context for r in results]
+    applied = [c for c in contexts if c.chord and c.chord.applied]
+    assert applied, "sustained withholding should deploy a secondary dominant"
+    for c in applied:
+        assert c.obligation == f"tonicize:{c.chord.applied}"
+        assert contexts[c.bar + 1].chord.degree == c.chord.applied   # resolves next bar
+    raw = [ev for r in results for ev in r.raw_events]
+    assert lint(raw, contexts, METER, stage="pre") == []             # chromatic tones lint clean
+
+
+def test_secondary_dominant_off_when_disabled():
+    contexts = [r.context for r in _dramaturg_render(earned=False, valence=-0.5)]
+    assert not any(c.chord and c.chord.applied for c in contexts)
+    assert not any(c.obligation for c in contexts)
 
 
 def test_earned_dissonance_off_is_inert():
