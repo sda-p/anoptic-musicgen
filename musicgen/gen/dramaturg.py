@@ -65,6 +65,7 @@ class DramaturgConfig:
     big_spend: float = 0.7      # payoff magnitude above which the spend lifts the mode 2 steps, not 1
     max_debt: int = 96          # clamp so a runaway trajectory can't unbound the ledger
     earned_dissonance: bool = True  # M14: deploy obligation-bearing dissonance (suspensions …); False => M13-identical
+    motif_lifecycle: bool = True    # M15: a persistent signature motif; its completed statement lands on a spend
 
 
 @dataclass

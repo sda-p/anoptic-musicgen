@@ -17,6 +17,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
+from musicgen.gen.motif import realize_faithful
 from musicgen.gen.rhythm import rough_cell
 from musicgen.gen.structure import PhrasePos
 from musicgen.ir import GRID, HarmonicContext, Meter, MusicalParams, NoteEvent
@@ -104,6 +105,18 @@ def _ornament(m: Motif, rng: random.Random) -> Motif:
     return Motif(rhythm, contour, m.shape)
 
 
+def admissible_transforms(motif: Motif, slots: int = 16) -> list[tuple[str, Motif]]:
+    """The transforms M17 may apply to fit an authored signature into an upcoming
+    phrase (§5.5): identity plus inversion / displacement / truncation — widening
+    where it drops in cleanly, without dissolving its identity."""
+    return [
+        ("identity", motif),
+        ("inversion", _invert(motif)),
+        ("displacement", _displace(motif, slots)),
+        ("truncation", _truncate(motif)),
+    ]
+
+
 def phrase_variant(motif: Motif, pos: int, rng: random.Random, slots: int = 16) -> tuple[Motif, str]:
     """Sentence-form plan: statement, sequences, developments, ornament drive."""
     if pos == 0:
@@ -142,41 +155,19 @@ def _velocity(params: MusicalParams, emphasis: int = 0) -> int:
     return max(1, min(127, params.velocity_center + emphasis))
 
 
-# --- bar generation ----------------------------------------------------------
-
-def generate_melody(
-    ctx: HarmonicContext,
-    meter: Meter,
-    params: MusicalParams,
-    pos: PhrasePos,
-    motif: Motif,
-    state: MelodyState,
-    cfg: MelodyConfig,
-    rng: random.Random,
-) -> tuple[list[NoteEvent], MelodyState, str]:
-    lo = params.register_center - cfg.range_semitones
-    hi = params.register_center + cfg.range_semitones
-
-    if pos.slot == "cadence" and ctx.cadence_policy:
-        return _cadence_bar(ctx, meter, params, state, lo, hi, rng)
-
-    rest_prob = max(0.0, cfg.bar_rest_max - params.note_density * 0.4)
-    if pos.slot == "free" and rng.random() < rest_prob:
-        return [], state, "melody: rest bar"
-
-    mscale = ctx.chord.scale_for(ctx.scale) if ctx.chord else ctx.scale
-    strong = set(meter.strong_slots())
-    variant, op = phrase_variant(motif, pos.pos, rng, meter.slots)
-
+def _place(cell, ctx, mscale, params, state, lo, hi, strong):
+    """Constraint-first placement of a rhythm+contour cell: strong beats snap to
+    chord tones, weak beats step, leaps recover, the register folds toward center.
+    Returns (placed, anchor). This is the disposable/disguised realization —
+    signature statements go through realize_faithful instead."""
     anchor_target = state.prev_pitch if state.prev_pitch is not None else params.register_center
     anchor_target = min(max(anchor_target, lo + 3), hi - 3)
     anchor = _nearest_pc_pitch(ctx.chord_pcs, anchor_target, lo, hi)
-
     placed: list[tuple[int, int, int]] = []  # (slot, dur_slots, pitch)
     prev = state.prev_pitch
     recovery = 0  # forced step direction after a leap, else 0
-    last_index = len(variant.rhythm) - 1
-    for i, ((slot, dur_slots), offset) in enumerate(zip(variant.rhythm, variant.contour)):
+    last_index = len(cell.rhythm) - 1
+    for i, ((slot, dur_slots), offset) in enumerate(zip(cell.rhythm, cell.contour)):
         if recovery and prev is not None:
             # A leap must resolve by an opposite step — even on a strong slot
             # (an appoggiatura-style resolution; the ratio rule has slack).
@@ -201,11 +192,75 @@ def generate_melody(
         recovery = 0 if abs(interval) <= 5 else (-1 if interval > 0 else 1)
         placed.append((slot, dur_slots, pitch))
         prev = pitch
+    return placed, anchor
+
+
+def _introduce(motif, ctx, mscale, params, state, lo, hi, strong):
+    """Fragmentary introduction (§5.5, M15): a truncated cell that ends on an
+    unstable degree (2̂ or 7̂) — the motif glimpsed and left hanging, so the later
+    completed statement reads as an arrival. Realized in disguise (constraint-first)."""
+    k = max(1, (len(motif.rhythm) + 1) // 2)  # the first half — a fragment
+    frag = Motif(motif.rhythm[:k], motif.contour[:k], motif.shape)
+    placed, anchor = _place(frag, ctx, mscale, params, state, lo, hi, strong)
+    if placed:  # nudge the final note to the nearest 2̂/7̂ — the unresolved, hanging tail
+        slot, dur, last = placed[-1]
+        unstable_pcs = (ctx.scale.pitch_at(2, 4) % 12, ctx.scale.pitch_at(7, 4) % 12)
+        placed[-1] = (slot, dur, _nearest_pc_pitch(unstable_pcs, last, lo, hi))
+    return placed, anchor, "introduced"
+
+
+# --- bar generation ----------------------------------------------------------
+
+def generate_melody(
+    ctx: HarmonicContext,
+    meter: Meter,
+    params: MusicalParams,
+    pos: PhrasePos,
+    motif: Motif,
+    state: MelodyState,
+    cfg: MelodyConfig,
+    rng: random.Random,
+    lifecycle: str = "",
+) -> tuple[list[NoteEvent], MelodyState, str]:
+    """One bar of melody. `lifecycle` selects the motif realization (M15):
+    "completed" — the faithful signature statement; "introduced" — a fragmentary
+    glimpse ending unstably; "developed"/"" — the disguised constraint-first
+    development (byte-identical to the disposable path when "")."""
+    lo = params.register_center - cfg.range_semitones
+    hi = params.register_center + cfg.range_semitones
+    faithful = lifecycle == "completed"
+
+    if pos.slot == "cadence" and ctx.cadence_policy:
+        return _cadence_bar(ctx, meter, params, state, lo, hi, rng)
+
+    rest_prob = max(0.0, cfg.bar_rest_max - params.note_density * 0.4)
+    if not faithful and pos.slot == "free" and rng.random() < rest_prob:
+        return [], state, "melody: rest bar"  # a completed statement never rests
+
+    mscale = ctx.chord.scale_for(ctx.scale) if ctx.chord else ctx.scale
+    strong = set(meter.strong_slots())
+
+    if faithful:
+        # Signature-faithful realization (§5.5, M15): the whole cell transposed to
+        # fit, contour intact — the completed statement the ear recognizes. It
+        # connects to the previous pitch so successive statements don't leap.
+        placed = realize_faithful(motif, mscale, ctx.chord_pcs, lo, hi, strong, near=state.prev_pitch)
+        anchor, op = (placed[0][2] if placed else params.register_center), "faithful"
+    elif lifecycle == "introduced":
+        placed, anchor, op = _introduce(motif, ctx, mscale, params, state, lo, hi, strong)
+    else:
+        variant, op = phrase_variant(motif, pos.pos, rng, meter.slots)
+        placed, anchor = _place(variant, ctx, mscale, params, state, lo, hi, strong)
 
     bar_start = ctx.bar * meter.bar_quarters
     events: list[NoteEvent] = []
     for i, (slot, dur_slots, pitch) in enumerate(placed):
-        if pitch % 12 in ctx.chord_pcs:
+        if faithful:
+            # a completed signature statement is licensed as a whole — its
+            # intervals are the identity (verified by recognizability), so the
+            # note-level melodic heuristics do not apply (see verify._lint_melody).
+            role = "motif"
+        elif pitch % 12 in ctx.chord_pcs:
             role = "chord-tone"
         elif ctx.scale.contains(pitch):
             prev_p = placed[i - 1][2] if i else None

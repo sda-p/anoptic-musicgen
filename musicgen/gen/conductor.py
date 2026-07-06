@@ -29,8 +29,10 @@ from musicgen.control.mapping import MappingTable
 from musicgen.gen import structure
 from musicgen.gen.arp import ArpConfig, PATTERNS as ARP_PATTERNS, generate_arp
 from musicgen.gen.bass import BassConfig, generate_bass
-from musicgen.gen.dramaturg import Dramaturg, DramaturgConfig, Ledger
+from musicgen.gen.dramaturg import Dramaturg, DramaturgConfig, Ledger, spend_magnitude
 from musicgen.gen.melody import MelodyConfig, MelodyState, Motif, generate_melody, make_motif
+from musicgen.gen.motif import MotifLifecycle
+from musicgen.gen.signatures import MotifDirector, SignatureMotif
 from musicgen.gen.pad import generate_pad
 from musicgen.gen.perc import PercConfig, generate_perc
 from musicgen.ir import LAYER_NAMES, HarmonicContext, Meter, MusicalParams, NoteEvent
@@ -45,6 +47,7 @@ from musicgen.theory.voicing import VoicingConfig
 
 DEFAULT_CADENCE_CYCLE = ("authentic", "half", "deceptive", "authentic")
 _MIN_MELODY_RANGE = 6  # floor the dramaturg's melody-range contraction stays above (lint-safe)
+_LANDMARK_IMPORTANCE = 0.8  # a signature this important lands as a payoff arrival (§5.5, M17)
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,8 @@ class EngineConfig:
     wander_phrases: int | None = None  # auto-modulate ±1 fifth every N phrases (None: never)
     cadence_policies: tuple[str, ...] | None = None  # None: tension-driven (mapper) / default cycle (static)
     dramaturg: DramaturgConfig | None = None  # None: off (byte-identical); set: tension-debt ledger (§5.8, M13)
+    motif_library: tuple[SignatureMotif, ...] = ()  # authored signature motifs (§5.5, M17); empty: byte-identical
+    motif_leniency: float = 0.5  # signature-selection leniency when no dramaturg supplies one (M17)
     mapper: MappingTable | None = None
     chains: dict[str, tuple] = field(default_factory=default_chains)  # {} disables modifiers
     harmony: HarmonyConfig = field(default_factory=HarmonyConfig)
@@ -104,6 +109,10 @@ class ConductorState:
     prev_bass_root: int | None = None
     melody: MelodyState = field(default_factory=MelodyState)
     motifs: dict[int, Motif] = field(default_factory=dict)
+    motif_lifecycle: MotifLifecycle | None = None  # persistent signature (M15; None when disabled)
+    motif_director: MotifDirector | None = None    # authored-signature selection (M17; None when no library)
+    pending_signature: Motif | None = None         # the signature to state this phrase, or None
+    requested_motif: str = ""                      # the game's request_motif(tag), pending until stated
     ledger: Ledger = field(default_factory=Ledger)  # dramaturg state (unused when disabled)
     last_fill: bool = False
     # key state (home lives in EngineConfig.key_tonic)
@@ -144,6 +153,8 @@ class MusicEngine:
         self.overrides: dict[str, object] = {}
         self._urgent = False
         self.dramaturg = Dramaturg(cfg.dramaturg) if cfg.dramaturg is not None else None
+        if cfg.motif_library:
+            self.state.motif_director = MotifDirector(library=tuple(cfg.motif_library))
 
         if cfg.mapper is not None:
             self.state.current_mode = cfg.mode or mapping.nearest_mode(self.affect.valence)
@@ -190,6 +201,14 @@ class MusicEngine:
         pc = name_to_midi(f"{tonic}4") % 12 if isinstance(tonic, str) else int(tonic) % 12
         self.state.pending_key = (pc, urgent)
 
+    def request_motif(self, tag: str) -> None:
+        """Bind meaning (§5.5, M17): ask the signature director to state the authored
+        motif `tag` at the next musically sound phrase boundary — the game's one place
+        to contribute authored knowledge. The request forces the tag past the overdue
+        gate (it need only land cleanly) and persists until honoured; an unknown tag or
+        an empty library is a no-op."""
+        self.state.requested_motif = tag
+
     # --- internals -----------------------------------------------------------
 
     @property
@@ -197,6 +216,19 @@ class MusicEngine:
         """Active only when a dramaturg exists AND its (hot-swappable) config is
         enabled — so the disabled path is byte-identical to no dramaturg."""
         return self.dramaturg is not None and self.dramaturg.cfg.enabled
+
+    @property
+    def _lifecycle_on(self) -> bool:
+        """The motif lifecycle needs the dramaturg (its completed statement lands
+        on a spend); off ⇒ the disposable per-phrase motif, byte-identical."""
+        return self._dramaturg_on and self.dramaturg.cfg.motif_lifecycle
+
+    @property
+    def _director_on(self) -> bool:
+        """Authored signatures play whenever the library is non-empty (independent of
+        the dramaturg — the game's leitmotifs recur regardless of tension); an empty
+        library is byte-identical."""
+        return self.state.motif_director is not None and bool(self.state.motif_director.library)
 
     def _policy(self, phrase: int) -> str:
         plan = self.state.modulation
@@ -441,6 +473,19 @@ class MusicEngine:
             directive = self.dramaturg.on_bar(state.ledger, self.affect.tension, pos)
             dramaturg_note = directive.note
 
+        # Motif lifecycle (§5.5, M15): a persistent signature advances at each
+        # phrase boundary; its completed (faithful) statement is gated on a spend.
+        lifecycle_state = ""
+        if self._lifecycle_on:
+            if state.motif_lifecycle is None:
+                state.motif_lifecycle = MotifLifecycle(make_motif(
+                    self.seeder.stream("signature"), cfg.params.note_density,
+                    cfg.params.roughness, cfg.melody, slots=cfg.meter.slots))
+            if pos.pos == 0:
+                spend = directive is not None and directive.payoff > 0
+                state.motif_lifecycle.advance(spend, pos.phrase)
+            lifecycle_state = state.motif_lifecycle.state
+
         if (cfg.wander_phrases is not None and pos.pos == 0 and bar > 0
                 and state.pending_key is None and state.modulation is None
                 and pos.phrase - state.last_key_phrase >= cfg.wander_phrases):
@@ -525,6 +570,43 @@ class MusicEngine:
             trace.append(dramaturg_note)
         if instr_note:
             trace.append(instr_note)
+
+        # Authored signatures (§5.5, M17): at a phrase boundary the director weighs
+        # each signature's overdue×importance against how well this phrase's harmony
+        # hosts it; a selection is stated faithfully across the phrase (below).
+        if self._director_on and pos.pos == 0:
+            leniency = self.dramaturg.cfg.leniency if self._dramaturg_on else cfg.motif_leniency
+            lo = params.register_center - cfg.melody.range_semitones
+            hi = params.register_center + cfg.melody.range_semitones
+            sel = state.motif_director.select(
+                self.scale, ctx.chord_pcs, lo, hi, set(cfg.meter.strong_slots()),
+                leniency, near=state.melody.prev_pitch, requested=state.requested_motif)
+            if sel is not None:
+                sig, _transform, motif_t = sel
+                state.pending_signature = motif_t
+                state.motif_director.observe(sig.tag, pos.bars)
+                if sig.tag == state.requested_motif:
+                    state.requested_motif = ""  # the game's request has been honoured
+                trace.append(state.motif_director.last)
+                # A landmark lands as an *arrival*: force this phrase's cadence to
+                # authentic (the M14 cadential suspension/appoggiatura follow, as the
+                # overlay keys off phrase_cadence) and cash whatever tension-debt had
+                # accrued — the landmark statement *is* the payoff (§5.5/§5.8).
+                if sig.importance >= _LANDMARK_IMPORTANCE and self._dramaturg_on:
+                    # A landmark lands as an arrival: force this phrase to an authentic
+                    # cadence (the M14 cadential suspension/appoggiatura follow) and cash
+                    # the accrued *debt* — the payoff. It deliberately leaves the per-bar
+                    # withholding signals (pedal, tonic-circling) untouched, so they run
+                    # on undisturbed to the now-authentic cadence and terminate cleanly;
+                    # if tension stays high the buildup simply resumes after the arrival.
+                    led = state.ledger
+                    led.last_spend = spend_magnitude(led, self.dramaturg.cfg)
+                    led.bars_since_authentic = led.deceptions = 0
+                    led.phrase_cadence[pos.phrase] = "authentic"
+                    trace.append(f"landmark '{sig.tag}' spends the ledger (payoff {led.last_spend:.2f})")
+            else:
+                state.pending_signature = None
+                state.motif_director.age(pos.bars)
         layers = params.layers
         if "pad" in layers:
             pad_events, voicing, pad_trace = generate_pad(
@@ -552,13 +634,21 @@ class MusicEngine:
                 # on the spend (register_cap is 0 then) — the audible bloom
                 mel_cfg = replace(cfg.melody, range_semitones=max(
                     _MIN_MELODY_RANGE, cfg.melody.range_semitones - directive.register_cap))
+            # An authored signature (if the director launched one this phrase) is
+            # stated faithfully — reusing the M15 completed path; otherwise the
+            # generated lifecycle motif (or the disposable per-phrase motif).
+            sig_motif = state.pending_signature if self._director_on else None
+            mel_motif = sig_motif if sig_motif is not None else self._motif(pos.phrase, params)
+            mel_lifecycle = "completed" if sig_motif is not None else lifecycle_state
             mel_events, mel_state, mel_trace = generate_melody(
-                ctx, cfg.meter, params, pos, self._motif(pos.phrase, params),
+                ctx, cfg.meter, params, pos, mel_motif,
                 state.melody, mel_cfg, self.seeder.stream("melody", bar),
+                lifecycle=mel_lifecycle,
             )
             events.extend(mel_events)
             state.melody = mel_state
-            trace.append(mel_trace)
+            tag = " │ signature" if sig_motif is not None else (f" │ motif {lifecycle_state}" if lifecycle_state else "")
+            trace.append(mel_trace + tag)
         if "arp" in layers:
             pattern_rng = self.seeder.stream("arp-pattern", pos.phrase)
             arp_events, arp_trace = generate_arp(
@@ -600,6 +690,10 @@ class MusicEngine:
         return BarResult(bar, final, events, ctx, params, self.affect.as_tuple(), tempo_points, trace)
 
     def _motif(self, phrase: int, params: MusicalParams) -> Motif:
+        # With the lifecycle on, every phrase develops the one persistent signature
+        # (created in advance_bar); otherwise a fresh disposable motif per phrase.
+        if self._lifecycle_on and self.state.motif_lifecycle is not None:
+            return self.state.motif_lifecycle.motif
         if phrase not in self.state.motifs:
             self.state.motifs[phrase] = make_motif(
                 self.seeder.stream("motif", phrase),

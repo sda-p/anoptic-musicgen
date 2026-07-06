@@ -22,10 +22,13 @@ from musicgen.theory.pitch import pitch_name
 
 # Roles that license a pitch outside the bar's scale. "echo" covers modifier
 # repeats bleeding into the next bar's harmony (reverb-like, not a wrong note).
-CHROMATIC_ROLES = {"approach", "borrowed", "chromatic", "echo"}
+# "motif" is a completed signature statement (M15): licensed as a whole — its
+# identity is verified by recognizability, not the note-level melodic heuristics.
+CHROMATIC_ROLES = {"approach", "borrowed", "chromatic", "echo", "motif"}
+MOTIF_ROLE = "motif"
 # Roles that license a non-chord tone (melodic embellishment, held pedal, a
-# prepared suspension). The obligation-bearing ones (pedal, suspension) also
-# have to *discharge* — see _lint_obligations (M14, §5.8).
+# prepared suspension, a signature statement). The obligation-bearing ones (pedal,
+# suspension) also have to *discharge* — see _lint_obligations (M14, §5.8).
 LICENSED_NONCHORD = CHROMATIC_ROLES | {"passing", "neighbor", "pedal", "appoggiatura", "suspension"}
 SUSPENSION_ROLE, RESOLUTION_ROLE, PEDAL_ROLE, APPOGGIATURA_ROLE = (
     "suspension", "resolution", "pedal", "appoggiatura")
@@ -167,12 +170,18 @@ def _lint_melody(events, ctx_by_bar, meter, limits, out) -> None:
             out.append(Violation("melody-range", meter.bar_of(ev.start),
                                  f"{pitch_name(ev.pitch)} outside melody range [{pitch_name(lo)}, {pitch_name(hi)}]"))
 
+    # A completed signature statement is exempt from the constraint-first melodic
+    # heuristics (strong-beat chord tones, leap recovery): its intervals are the
+    # identity, licensed as a whole (M15). Its register is still bounded above.
+    tuneful = [e for e in melody if e.role != MOTIF_ROLE]
     strong = set(meter.strong_slots())
     on_strong = [
-        (e, ctx) for e in melody
+        (e, ctx) for e in tuneful
         if meter.slot_of(e.start) in strong
         and (ctx := ctx_by_bar.get(meter.bar_of(e.start))) is not None
         and ctx.chord_pcs
+        and ctx.cadence_slot != "cadence"   # the cadence bar is a deliberate embellished
+        #   approach (appoggiatura → run → resolution), not chord-tone outlining
     ]
     if on_strong:
         chordal = sum(1 for e, ctx in on_strong if e.pitch % 12 in ctx.chord_pcs)
@@ -185,7 +194,7 @@ def _lint_melody(events, ctx_by_bar, meter, limits, out) -> None:
             ))
 
     leaps = resolved = 0
-    for a, b, c in zip(melody, melody[1:], melody[2:]):
+    for a, b, c in zip(tuneful, tuneful[1:], tuneful[2:]):
         if b.start - a.end > 2.0 or c.start - b.end > 2.0:
             continue  # a rest breaks the line; no recovery expected
         interval = b.pitch - a.pitch
