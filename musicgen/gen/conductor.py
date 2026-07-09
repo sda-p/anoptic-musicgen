@@ -677,6 +677,7 @@ class MusicEngine:
                 state.pending_signature = None
                 state.motif_director.age(pos.bars)
         layers = params.layers
+        bass_events: list[NoteEvent] = []  # realized bass (A3: the melody's outer-voice guard reads it)
         if "pad" in layers:
             pad_events, voicing, pad_trace = generate_pad(
                 ctx, cfg.meter, params, state.prev_voicing, cfg.voicing,
@@ -719,6 +720,7 @@ class MusicEngine:
                 ctx, cfg.meter, params, pos, self._motif(pos.phrase, params),
                 state.melody, mel_cfg, self.seeder.stream("melody", bar),
                 lifecycle=mel_lifecycle, signature=signature, apex=apex,
+                bass=bass_events,
             )
             events.extend(mel_events)
             state.melody = mel_state

@@ -41,7 +41,7 @@ these waves start from a clean baseline.
 |---|------|-----------|--------|--------------|-------------|
 | A1 | Phrasing / performance shaping ✚ *(done)* | S | ★★★★★ | — | no |
 | A2 | Groove persistence contract ✚ *(done)* | S | ★★★ | — | no |
-| A3 | Outer-voice counterpoint (lint + guards) | S–M | ★★★★ | — | rules → spec |
+| A3 | Outer-voice counterpoint (lint + guards) ✚ *(done)* | S–M | ★★★★ | — | rules → spec |
 | A4 | Single-apex contour planning ✚ *(done)* | S | ★★★ | — | no |
 | B1 | Cadential 6/4 (prepared authentic cadence) | S | ★★★★ | — | no |
 | B2 | Antecedent–consequent periods | M | ★★★★★ | — | planner → spec |
@@ -133,7 +133,7 @@ already does (`stream("arp-pattern", phrase)`):
 constant, non-fill perc events are bar-to-bar identical; verify on the automated
 sweeps. This pins the contract the C engine should inherit.
 
-### A3. Outer-voice counterpoint — lint + generation guards
+### A3. Outer-voice counterpoint — lint + generation guards ✚ *(done; PLANS.md M20)*
 
 **Payoff ★★★★ / Complexity S–M.** The soprano–bass frame carries tonal music and
 is currently unguarded: nothing prevents parallel 5ths/8ves between melody and

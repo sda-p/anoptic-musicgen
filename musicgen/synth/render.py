@@ -255,7 +255,8 @@ class RealtimeSynthPlayer:
                 cfg.chains = default_chains(perform=bool(f["shaping"]))
                 cfg.cadence_rit = float(f["cadence_rit"]) if f["shaping"] else 0.0
                 cfg.phrase_groove = bool(f["phrase_groove"])
-                cfg.melody = _replace(cfg.melody, plan_apex=bool(f["plan_apex"]))
+                cfg.melody = _replace(cfg.melody, plan_apex=bool(f["plan_apex"]),
+                                      counterpoint=bool(f["counterpoint"]))
             elif command[0] == "key":
                 self.engine.request_key(command[1], urgent=command[2])
 

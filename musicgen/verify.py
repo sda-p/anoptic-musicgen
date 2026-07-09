@@ -18,6 +18,9 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from musicgen.ir import GRID, HarmonicContext, Meter, NoteEvent
+from musicgen.theory.counterpoint import (
+    forbidden_direct, forbidden_parallel, interval_class, motion,
+)
 from musicgen.theory.pitch import pitch_name
 
 # Roles that license a pitch outside the bar's scale. "echo" covers modifier
@@ -354,6 +357,77 @@ def lint_groove(
 
     check("groove-perc", {b: tuple(sorted(v)) for b, v in perc_pat.items()}, skip_cadence=True)
     check("groove-arp", {b: tuple(sorted(v)) for b, v in arp_pat.items()}, skip_cadence=False)
+    return out
+
+
+def lint_outer(
+    events: Sequence[NoteEvent],
+    contexts: Sequence[HarmonicContext],
+    meter: Meter = Meter(),
+    *,
+    contrary_min: float = 0.5,
+) -> list[Violation]:
+    """A3 outer-voice frame rules (REFINEMENT_PLAN): the soprano-bass pair at
+    successive strong-slot melody onsets must not form consecutive perfects
+    (parallel/antiparallel 5ths & 8ves) or reach a perfect by a similar-motion
+    melody leap on a downbeat (direct 5ths/8ves); cadence arrivals prefer
+    contrary/oblique motion across the barline (ratio rule with slack). A rest
+    longer than a bar breaks the frame. Signature statements (role "motif")
+    are licensed as a whole (M15 doctrine) and echoes ring free, so both are
+    exempt from pair sampling. Run on pre-modifier IR; standalone like
+    lint_groove — folded into lint() once the guard becomes the default."""
+    bass = sorted((e for e in events if e.layer == "bass"), key=lambda e: e.start)
+    melody = sorted((e for e in events if e.layer == "melody"
+                     and e.role not in (MOTIF_ROLE, "echo")), key=lambda e: e.start)
+    strong = set(meter.strong_slots())
+
+    def bass_at(t: float):
+        cur = None
+        for b in bass:
+            if b.start > t + 1e-9:
+                break
+            if t < b.end - 1e-9:
+                cur = b
+        return cur
+
+    pairs = []  # (t, melody pitch, bass pitch, bar, slot)
+    for m in melody:
+        slot = meter.slot_of(m.start)
+        if slot not in strong:
+            continue
+        b = bass_at(m.start)
+        if b is not None:
+            pairs.append((m.start, m.pitch, b.pitch, meter.bar_of(m.start), slot))
+
+    out: list[Violation] = []
+    for (t1, m1, b1, _, _), (t2, m2, b2, bar2, slot2) in zip(pairs, pairs[1:]):
+        if t2 - t1 > meter.bar_quarters + 1e-9:
+            continue  # the frame broke (a rest bar / gated melody)
+        name = {0: "octaves", 7: "fifths"}.get(interval_class(b2, m2), "?")
+        if forbidden_parallel(b1, m1, b2, m2):
+            out.append(Violation("outer-parallel", bar2,
+                f"parallel {name} between melody and bass: "
+                f"{pitch_name(m1)}/{pitch_name(b1)} -> {pitch_name(m2)}/{pitch_name(b2)}"))
+        elif slot2 == 0 and forbidden_direct(b1, m1, b2, m2):
+            out.append(Violation("outer-direct", bar2,
+                f"direct {name} into the downbeat: melody leaps "
+                f"{pitch_name(m1)} -> {pitch_name(m2)} in similar motion with the bass"))
+
+    good = total = 0
+    for ctx in contexts:
+        if ctx.cadence_slot != "cadence":
+            continue
+        bar_start = ctx.bar * meter.bar_quarters
+        before = [p for p in pairs if bar_start - meter.bar_quarters - 1e-9 < p[0] < bar_start - 1e-9]
+        after = [p for p in pairs if p[3] == ctx.bar]
+        if before and after:
+            total += 1
+            (_, m1, b1, _, _), (_, m2, b2, _, _) = before[-1], after[0]
+            good += motion(b1, m1, b2, m2) in ("contrary", "oblique")
+    if total >= 4 and good / total < contrary_min:
+        out.append(Violation("outer-cadence", -1,
+            f"only {good}/{total} cadences approached in contrary/oblique motion "
+            f"({good / total:.2f} < {contrary_min})"))
     return out
 
 

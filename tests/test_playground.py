@@ -128,18 +128,19 @@ def test_perform_controls():
 
     st = PlaygroundState()
     p = st.snapshot()["perform"]  # all off by default -> byte-identical baseline
-    assert p == {"shaping": False, "cadence_rit": 0.025, "phrase_groove": False, "plan_apex": False}
+    assert p == {"shaping": False, "cadence_rit": 0.025, "phrase_groove": False,
+                 "plan_apex": False, "counterpoint": False}
     engine = st._build_engine()
     assert engine.config.cadence_rit == 0.0 and not engine.config.phrase_groove
-    assert not engine.config.melody.plan_apex
+    assert not engine.config.melody.plan_apex and not engine.config.melody.counterpoint
 
-    st.set_perform_fields({"shaping": True, "phrase_groove": True,
-                           "plan_apex": True, "cadence_rit": 0.03})
+    st.set_perform_fields({"shaping": True, "phrase_groove": True, "plan_apex": True,
+                           "counterpoint": True, "cadence_rit": 0.03})
     engine = st._build_engine()
     from musicgen.modifiers import Perform
     assert any(isinstance(m, Perform) for m in engine.config.chains["melody"])
     assert engine.config.cadence_rit == 0.03 and engine.config.phrase_groove
-    assert engine.config.melody.plan_apex
+    assert engine.config.melody.plan_apex and engine.config.melody.counterpoint
     st.set_perform_fields({"bogus_knob": 1.0})              # unknown field ignored, no crash
     assert "bogus_knob" not in st.snapshot()["perform"]
 

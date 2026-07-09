@@ -25,6 +25,7 @@ from musicgen.gen.motif import realize_cadential, realize_faithful
 from musicgen.gen.rhythm import rough_cell
 from musicgen.gen.structure import PhrasePos
 from musicgen.ir import GRID, HarmonicContext, Meter, MusicalParams, NoteEvent
+from musicgen.theory.counterpoint import forbidden_direct, forbidden_parallel
 from musicgen.theory.pitch import pitch_name
 from musicgen.theory.scales import Scale, diatonic_shift, snap_to_scale
 
@@ -42,6 +43,9 @@ class MelodyConfig:
     span_min: int = 2
     span_max: int = 4
     plan_apex: bool = False  # A4: one planned melodic apex per phrase (off = byte-identical)
+    counterpoint: bool = False  # A3: guard the melody-bass frame — strong-beat picks avoid
+    #                             consecutive/direct perfects, cadences approach in contrary
+    #                             motion (off = byte-identical)
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,9 @@ class Motif:
 class MelodyState:
     prev_pitch: int | None = None
     prev_anchor: int | None = None
+    # (beat, melody pitch, bass pitch) at the last strong-slot melody onset —
+    # the outer-voice pair the A3 guard continues from across the barline
+    prev_outer: tuple[float, int, int] | None = None
 
 
 def _contour_offsets(shape: str, n: int, span: int) -> tuple[int, ...]:
@@ -205,14 +212,83 @@ def phrase_variant(motif: Motif, pos: int, rng: random.Random, slots: int = 16) 
 
 # --- pitch machinery ---------------------------------------------------------
 
+def _pc_candidates(pcs, target: int, lo: int, hi: int) -> list[int]:
+    """All in-range instances of the pcs, nearest-to-target first (ties break
+    low). The head of this list is what _nearest_pc_pitch returns; the A3
+    guard walks it looking for a counterpoint-clean pick."""
+    out = [p for pc in set(pcs) for p in range(lo + (pc - lo) % 12, hi + 1, 12)]
+    out.sort(key=lambda p: (abs(p - target), p))
+    return out or [target]
+
+
 def _nearest_pc_pitch(pcs, target: int, lo: int, hi: int) -> int:
-    best: int | None = None
-    for pc in set(pcs):
-        first = lo + (pc - lo) % 12
-        for p in range(first, hi + 1, 12):
-            if best is None or (abs(p - target), p) < (abs(best - target), best):
-                best = p
-    return best if best is not None else target
+    return _pc_candidates(pcs, target, lo, hi)[0]
+
+
+class _OuterGuard:
+    """Per-bar outer-voice guard (A3): mirrors verify.lint_outer's sampling —
+    the (melody, bass) pair at strong-slot melody onsets — and steers strong
+    chord-tone picks away from consecutive perfects (always) and direct
+    perfects (into downbeats) against the realized bass. Falls back to the
+    nearest candidate when every one is forbidden: the guard prefers, never
+    fails. `prev` carries across bars via MelodyState.prev_outer and expires
+    after a bar of silence, exactly like the linter's frame break."""
+
+    def __init__(self, bass_events, bar_start: float, bar_len: float,
+                 prev: tuple[float, int, int] | None) -> None:
+        self.bass = [(e.start, e.end, e.pitch) for e in bass_events]
+        self.bar_start = bar_start
+        self.bar_len = bar_len
+        self.prev = prev
+
+    def bass_at(self, t: float) -> int | None:
+        cur = None
+        for start, end, pitch in self.bass:
+            if start > t + 1e-9:
+                break
+            if t < end - 1e-9:
+                cur = pitch
+        return cur
+
+    def _pair(self, t: float) -> tuple[int, int] | None:
+        if self.prev is None or t - self.prev[0] > self.bar_len + 1e-9:
+            return None
+        return self.prev[1], self.prev[2]
+
+    def pick(self, pcs, target: int, lo: int, hi: int, slot: int) -> int:
+        cands = _pc_candidates(pcs, target, lo, hi)
+        t = self.bar_start + slot * GRID
+        bass, pair = self.bass_at(t), self._pair(self.bar_start + slot * GRID)
+        if bass is None or pair is None:
+            return cands[0]
+        prev_m, prev_b = pair
+        for p in cands:
+            if forbidden_parallel(prev_b, prev_m, bass, p):
+                continue
+            if slot == 0 and forbidden_direct(prev_b, prev_m, bass, p):
+                continue
+            return p
+        return cands[0]
+
+    def observe(self, slot: int, pitch: int) -> None:
+        """Record the realized pair at a strong onset — whatever branch chose
+        the pitch (guarded pick, leap recovery, contraction)."""
+        t = self.bar_start + slot * GRID
+        bass = self.bass_at(t)
+        if bass is not None:
+            self.prev = (t, pitch, bass)
+
+    def recovery_collides(self, slot: int, rec_pitch: int) -> bool:
+        """Would a forced leap-recovery note at `slot` land a forbidden perfect?
+        The recovery pitch is fully determined (one opposite diatonic step), so
+        the collision is checkable BEFORE committing the leap that forces it."""
+        t = self.bar_start + slot * GRID
+        bass, pair = self.bass_at(t), self._pair(t)
+        if bass is None or pair is None:
+            return False
+        prev_m, prev_b = pair
+        return (forbidden_parallel(prev_b, prev_m, bass, rec_pitch)
+                or (slot == 0 and forbidden_direct(prev_b, prev_m, bass, rec_pitch)))
 
 
 # Metric accenting is owned by the Accent modifier (M4); the generator emits
@@ -225,13 +301,16 @@ def _velocity(params: MusicalParams, emphasis: int = 0) -> int:
     return max(1, min(127, params.velocity_center + emphasis))
 
 
-def _place(cell, ctx, mscale, params, state, lo, hi, strong, peak: int | None = None):
+def _place(cell, ctx, mscale, params, state, lo, hi, strong, peak: int | None = None,
+           guard: _OuterGuard | None = None):
     """Constraint-first placement of a rhythm+contour cell: strong beats snap to
     chord tones, weak beats step, leaps recover, the register folds toward center.
     Returns (placed, anchor). This is the disposable/disguised realization —
     signature statements go through realize_faithful instead. With `peak` (A4),
     the cell's highest contour note is lifted to the nearest chord tone of the
-    planned apex; a leap into it recovers by the standard opposite step — gap-fill."""
+    planned apex; a leap into it recovers by the standard opposite step — gap-fill.
+    With `guard` (A3), strong-slot chord-tone picks avoid consecutive/direct
+    perfects against the realized bass, and every strong onset updates the pair."""
     anchor_target = state.prev_pitch if state.prev_pitch is not None else params.register_center
     anchor_target = min(max(anchor_target, lo + 3), hi - 3)
     anchor = _nearest_pc_pitch(ctx.chord_pcs, anchor_target, lo, hi)
@@ -244,9 +323,14 @@ def _place(cell, ctx, mscale, params, state, lo, hi, strong, peak: int | None = 
         peak_i = max(range(len(cell.contour)), key=lambda i: cell.contour[i])
         if peak_i == last_index:
             peak_i = -1  # the final-note leap contraction below would undo it
+    def snap(target: int, slot: int) -> int:
+        if guard is not None and slot in strong:
+            return guard.pick(ctx.chord_pcs, target, lo, hi, slot)
+        return _nearest_pc_pitch(ctx.chord_pcs, target, lo, hi)
+
     for i, ((slot, dur_slots), offset) in enumerate(zip(cell.rhythm, cell.contour)):
         if i == peak_i and not (recovery and prev is not None):
-            pitch = _nearest_pc_pitch(ctx.chord_pcs, peak, lo, hi)
+            pitch = snap(peak, slot)
         elif recovery and prev is not None:
             # A leap must resolve by an opposite step — even on a strong slot
             # (an appoggiatura-style resolution; the ratio rule has slack).
@@ -254,11 +338,32 @@ def _place(cell, ctx, mscale, params, state, lo, hi, strong, peak: int | None = 
         else:
             target = _diatonic_shift(mscale, anchor, offset)
             if slot in strong:
-                pitch = _nearest_pc_pitch(ctx.chord_pcs, target, lo, hi)
+                pitch = snap(target, slot)
             else:
                 pitch = _snap_to_scale(mscale, min(max(target, lo), hi))
-                if prev is not None and abs(pitch - prev) > 5 and pitch % 12 not in ctx.chord_pcs:
-                    pitch = _diatonic_shift(mscale, prev, 1 if pitch > prev else -1)
+                if prev is not None and abs(pitch - prev) > 5:
+                    # a chord tone may absorb a moderate leap; under the A3 guard
+                    # it still may not plunge past a 6th (a 10+-semitone mid-bar
+                    # drop is a procedural tell) nor force a recovery step that
+                    # would land a forbidden perfect on the next strong slot —
+                    # the recovery pitch is determined, so look one step ahead
+                    step_instead = pitch % 12 not in ctx.chord_pcs or (
+                        guard is not None and abs(pitch - prev) > 9)
+                    if not step_instead and guard is not None and i + 1 < len(cell.rhythm):
+                        nslot = cell.rhythm[i + 1][0]
+                        rec = _diatonic_shift(mscale, pitch, -1 if pitch > prev else 1)
+                        step_instead = nslot in strong and guard.recovery_collides(nslot, rec)
+                    if step_instead:
+                        pitch = _diatonic_shift(mscale, prev, 1 if pitch > prev else -1)
+        if guard is not None and not lo <= pitch <= hi:
+            # under the guard, re-enter the window by stepping to its nearest
+            # scale tone instead of folding an octave: the fold manufactures a
+            # plunge the leap checks never saw, whose forced recovery then
+            # lands on the next strong slot unguarded
+            edge, step = (hi, -1) if pitch > hi else (lo, 1)
+            pitch = edge
+            while not mscale.contains(pitch):
+                pitch += step
         while pitch > hi:
             pitch -= 12
         while pitch < lo:
@@ -270,17 +375,20 @@ def _place(cell, ctx, mscale, params, state, lo, hi, strong, peak: int | None = 
         interval = 0 if prev is None else pitch - prev
         recovery = 0 if abs(interval) <= 5 else (-1 if interval > 0 else 1)
         placed.append((slot, dur_slots, pitch))
+        if guard is not None and slot in strong:
+            guard.observe(slot, pitch)  # whatever branch chose it
         prev = pitch
     return placed, anchor
 
 
-def _introduce(motif, ctx, mscale, params, state, lo, hi, strong):
+def _introduce(motif, ctx, mscale, params, state, lo, hi, strong,
+               guard: _OuterGuard | None = None):
     """Fragmentary introduction (§5.5, M15): a truncated cell that ends on an
     unstable degree (2̂ or 7̂) — the motif glimpsed and left hanging, so the later
     completed statement reads as an arrival. Realized in disguise (constraint-first)."""
     k = max(1, (len(motif.rhythm) + 1) // 2)  # the first half — a fragment
     frag = Motif(motif.rhythm[:k], motif.contour[:k], motif.shape)
-    placed, anchor = _place(frag, ctx, mscale, params, state, lo, hi, strong)
+    placed, anchor = _place(frag, ctx, mscale, params, state, lo, hi, strong, guard=guard)
     if placed:  # nudge the final note to the nearest 2̂/7̂ — the unresolved, hanging tail
         slot, dur, last = placed[-1]
         prev = placed[-2][2] if len(placed) > 1 else \
@@ -296,9 +404,15 @@ def _introduce(motif, ctx, mscale, params, state, lo, hi, strong):
             direction = -1 if prev > prev2 else 1
             pool = [p for p in cands if 1 <= (p - prev) * direction <= 2]
         else:
-            pool = [p for p in cands if abs(p - prev) <= 5] or cands
+            # without the guard the tail may reach any unstable instance; in
+            # A3 craft mode a leap onto the hanging tone must not go
+            # unrecovered (nothing recovers it — hanging is the point), so the
+            # nudge stands down when no near instance exists
+            pool = [p for p in cands if abs(p - prev) <= 5] or ([] if guard is not None else cands)
         if pool:
             placed[-1] = (slot, dur, min(pool, key=lambda p: (abs(p - last), p)))
+            if guard is not None and slot in strong:
+                guard.observe(slot, placed[-1][2])  # the nudge replaces the observed pick
     return placed, anchor, "introduced"
 
 
@@ -316,6 +430,7 @@ def generate_melody(
     lifecycle: str = "",
     signature: Motif | None = None,
     apex: ApexPlan | None = None,
+    bass: list[NoteEvent] | None = None,
 ) -> tuple[list[NoteEvent], MelodyState, str]:
     """One bar of melody. `lifecycle` stages the persistent `signature` (M15/M17)
     *positionally* within the phrase — the phrase keeps its own disposable `motif`,
@@ -335,17 +450,27 @@ def generate_melody(
     if lifecycle == "completed":
         apex = None  # the cadence-fused statement owns the phrase's shape (A4 stands down)
     apex_bar = apex is not None and pos.pos == apex.pos
-    if apex is not None and not apex_bar:
-        # single peak: every other bar stays below the apex (floored so the
-        # window never collapses past the dramaturg's own minimum range)
-        hi = max(min(hi, apex.pitch - 1), lo + 6)
+    if apex is not None:
+        # single peak: the apex bar itself tops out AT the plan (so the peak
+        # note is the bar's ceiling, not a waypoint on the way past it) and
+        # every other bar stays below it — floored so the window never
+        # collapses past the dramaturg's own minimum range
+        hi = max(min(hi, apex.pitch - (0 if apex_bar else 1)), lo + 6)
     sig = signature if signature is not None else motif
     sig_event = lifecycle in ("introduced", "developed", "stated") and pos.pos == pos.bars // 2
+
+    # A3 outer-voice guard: active when the frame exists (a realized bass) and
+    # the config asks for it. Signature realizations stay unguarded — their
+    # identity is licensed as a whole (M15) — but their pair still expires.
+    guard = None
+    if cfg.counterpoint and bass:
+        guard = _OuterGuard(bass, ctx.bar * meter.bar_quarters, meter.bar_quarters,
+                            state.prev_outer)
 
     if pos.slot == "cadence" and ctx.cadence_policy:
         if lifecycle == "completed":
             return _cadence_statement(sig, ctx, meter, params, state, lo, hi)
-        return _cadence_bar(ctx, meter, params, state, lo, hi, rng)
+        return _cadence_bar(ctx, meter, params, state, lo, hi, rng, guard)
 
     rest_prob = max(0.0, cfg.bar_rest_max - params.note_density * 0.4)
     if (lifecycle != "completed" and not sig_event and not apex_bar and pos.slot == "free"
@@ -361,13 +486,16 @@ def generate_melody(
         # constraint-first — bending to the harmony — so the faithful cadential
         # statement lands as the destination, not as the seventh repetition.
         variant, base_op = phrase_variant(sig, pos.pos, rng, meter.slots)
-        placed, anchor = _place(variant, ctx, mscale, params, state, lo, hi, strong)
+        placed, anchor = _place(variant, ctx, mscale, params, state, lo, hi, strong,
+                                guard=guard)
         op, shape = f"drive {base_op}", sig.shape
     elif sig_event and lifecycle == "introduced":
-        placed, anchor, op = _introduce(sig, ctx, mscale, params, state, lo, hi, strong)
+        placed, anchor, op = _introduce(sig, ctx, mscale, params, state, lo, hi, strong,
+                                        guard=guard)
         shape = sig.shape
     elif sig_event and lifecycle == "developed":
-        placed, anchor = _place(sig, ctx, mscale, params, state, lo, hi, strong)
+        placed, anchor = _place(sig, ctx, mscale, params, state, lo, hi, strong,
+                                guard=guard)
         op, shape = "signature disguised", sig.shape
     elif sig_event:  # "stated": the faithful recurrence of an authored signature (M17)
         placed = realize_faithful(sig, mscale, ctx.chord_pcs, lo, hi, strong, near=state.prev_pitch)
@@ -376,7 +504,7 @@ def generate_melody(
     else:
         variant, op = phrase_variant(motif, pos.pos, rng, meter.slots)
         placed, anchor = _place(variant, ctx, mscale, params, state, lo, hi, strong,
-                                peak=apex.pitch if apex_bar else None)
+                                peak=apex.pitch if apex_bar else None, guard=guard)
         if apex_bar:
             op += "+apex"
         shape = motif.shape
@@ -402,7 +530,9 @@ def generate_melody(
             "melody", degree=ctx.scale.degree_of(pitch), chord=ctx.chord_sym, role=role,
         ))
 
-    new_state = MelodyState(prev_pitch=placed[-1][2] if placed else state.prev_pitch, prev_anchor=anchor)
+    new_state = MelodyState(prev_pitch=placed[-1][2] if placed else state.prev_pitch,
+                            prev_anchor=anchor,
+                            prev_outer=guard.prev if guard is not None else state.prev_outer)
     return events, new_state, f"melody: {op} ({shape}) anchor {pitch_name(anchor)} n={len(placed)}"
 
 
@@ -444,7 +574,8 @@ def _cadence_statement(
         for i, (slot, dur, pitch) in enumerate(placed)
     ]
     target = placed[-1][2]
-    new_state = MelodyState(prev_pitch=target, prev_anchor=target)
+    new_state = MelodyState(prev_pitch=target, prev_anchor=target,
+                            prev_outer=state.prev_outer)
     names = " -> ".join(pitch_name(e.pitch) for e in events)
     return events, new_state, f"melody: cadence statement ({ctx.cadence_policy}) {names}"
 
@@ -457,12 +588,20 @@ def _cadence_bar(
     lo: int,
     hi: int,
     rng: random.Random,
+    guard: _OuterGuard | None = None,
 ) -> tuple[list[NoteEvent], MelodyState, str]:
     """Approach + held target: an appoggiatura-style formula converging on a
-    chord tone appropriate to the cadence policy (tendency-tone resolution)."""
+    chord tone appropriate to the cadence policy (tendency-tone resolution).
+    With the A3 guard, the approach direction runs contrary to the bass's
+    arrival — the frame's classic close: outer voices converge or diverge
+    into the cadence, never chase."""
     scale = ctx.scale
     candidate_pcs = _cadence_target_pcs(ctx)
     center = state.prev_pitch if state.prev_pitch is not None else params.register_center
+    if guard is not None:
+        # the window may have moved under the line (apex cap, register shift);
+        # re-enter at the edge instead of stepping from an out-of-range pitch
+        center = min(max(center, lo), hi)
 
     # Walk from where the line is toward the cadence target: a step first,
     # then re-anchor the target nearby, bridging any remaining gap with one
@@ -470,10 +609,40 @@ def _cadence_bar(
     # when the previous phrase ended at a register extreme.
     provisional = _nearest_pc_pitch(candidate_pcs, center, lo, hi)
     direction = 1 if provisional > center else -1
+    if guard is not None and state.prev_pitch is not None:
+        bass_now = guard.bass_at(guard.bar_start)
+        pair = guard._pair(guard.bar_start)
+        if bass_now is not None and pair is not None and bass_now != pair[1]:
+            direction = -1 if bass_now > pair[1] else 1  # contrary to the bass arrival
     first = _diatonic_shift(scale, center, direction) if state.prev_pitch is not None else \
         _diatonic_shift(scale, provisional, -direction)
     first = min(max(first, lo), hi)
+    if guard is not None:
+        if not scale.contains(first):  # the range clamp may land off-scale
+            first = snap_to_scale(scale, first)
+            if first > hi:
+                first = _diatonic_shift(scale, first, -1)
+        bass_now = guard.bass_at(guard.bar_start)
+        pair = guard._pair(guard.bar_start)
+        if bass_now is not None and pair is not None:
+            prev_m, prev_b = pair
+            def _clean(p: int) -> bool:
+                return not (forbidden_parallel(prev_b, prev_m, bass_now, p)
+                            or forbidden_direct(prev_b, prev_m, bass_now, p))
+            if not _clean(first):  # step to the nearest scale tone that opens cleanly
+                cands = sorted((p for p in range(lo, hi + 1) if scale.contains(p)),
+                               key=lambda p: (abs(p - first), p))
+                first = next((p for p in cands if _clean(p)), first)
     target = _nearest_pc_pitch(candidate_pcs, first, lo, hi)
+    if guard is not None and state.prev_pitch is not None and abs(first - state.prev_pitch) > 5:
+        # the window moved under the line (register contraction, apex cap) and
+        # the entry is a leap: run toward a target on the opposite side, so the
+        # walk itself is the recovery instead of continuing the plunge
+        entry = 1 if first > state.prev_pitch else -1
+        opposite = [p for p in _pc_candidates(candidate_pcs, first, lo, hi)
+                    if (p - first) * entry < 0]
+        if opposite:
+            target = opposite[0]
     if target == first:
         target = _nearest_pc_pitch(candidate_pcs, first + direction * 2, lo, hi)
 
@@ -511,6 +680,13 @@ def _cadence_bar(
     events.append(note(target_start, ctx.bar * meter.bar_quarters + meter.bar_quarters - target_start,
                        target, 6))
 
-    new_state = MelodyState(prev_pitch=target, prev_anchor=target)
+    if guard is not None:
+        strong = set(meter.strong_slots())
+        for e in events:  # chronological: first, run..., target
+            slot = meter.slot_of(e.start)
+            if slot in strong:
+                guard.observe(slot, e.pitch)
+    new_state = MelodyState(prev_pitch=target, prev_anchor=target,
+                            prev_outer=guard.prev if guard is not None else state.prev_outer)
     names = " -> ".join(pitch_name(e.pitch) for e in events)
     return events, new_state, f"melody: cadence ({ctx.cadence_policy}) {names}"

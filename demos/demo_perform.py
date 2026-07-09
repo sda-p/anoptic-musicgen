@@ -6,10 +6,13 @@
              plus the cadence micro-ritardando. Pre-modifier IR identical to
              plain: any audible difference IS the performance layer.
 - full:      A1 + A2 (perc/arp groove pinned per phrase — pattern identity as
-             a contract, fills stay free) + A4 (one planned melodic apex per
-             phrase; the hairpin crests with it). These change the notes
-             themselves, so raw IR legitimately differs; the groove contract
-             is verified with lint_groove.
+             a contract, fills stay free) + A3 (outer-voice counterpoint: no
+             parallel/direct 5ths & 8ves against the bass, contrary cadence
+             approaches) + A4 (one planned melodic apex per phrase; the
+             hairpin crests with it). These change the notes themselves, so
+             raw IR legitimately differs; the groove contract and the
+             outer-voice frame are verified with lint_groove / lint_outer —
+             and the plain variant's frame violations are reported as the A/B.
 
 Usage: .venv/bin/python demos/demo_perform.py [--seed N] [--no-audio]
 """
@@ -25,7 +28,7 @@ from musicgen.control.mapping import MappingTable
 from musicgen.gen.conductor import EngineConfig, MusicEngine
 from musicgen.gen.melody import MelodyConfig
 from musicgen.modifiers import default_chains
-from musicgen.verify import lint_groove
+from musicgen.verify import lint_groove, lint_outer
 
 AFFECT = {"valence": 0.25, "energy": 0.6, "tension": 0.3}  # tension low: authentic cadences
 
@@ -33,7 +36,8 @@ VARIANTS = (
     ("plain", dict(chains=default_chains())),
     ("performed", dict(chains=default_chains(perform=True), cadence_rit=0.025)),
     ("full", dict(chains=default_chains(perform=True), cadence_rit=0.025,
-                  phrase_groove=True, melody=MelodyConfig(plan_apex=True))),
+                  phrase_groove=True,
+                  melody=MelodyConfig(plan_apex=True, counterpoint=True))),
 )
 
 
@@ -63,6 +67,7 @@ def main() -> None:
             by_pos.setdefault(int(e.start // bars_q) % engine.config.phrase_bars, []).append(e.velocity)
         curve = " ".join(f"{mean(v):5.1f}" for _, v in sorted(by_pos.items()))
         rits = sum(1 for r in results for line in r.trace if "cadence rit" in line)
+        outer = lint_outer(raw, [r.context for r in results])
         extra = ""
         if name == "full":
             contract = lint_groove(raw, [r.context for r in results],
@@ -72,7 +77,8 @@ def main() -> None:
             extra = (f"\n  {'':<10} groove contract "
                      f"{'CLEAN' if not contract else f'{len(contract)} VIOLATIONS'}"
                      f" │ apex plans (phrase:bar@pitch) {apexes}")
-        print(f"  {name:<10} melody velocity by phrase bar │ {curve} │ rits {rits}{extra}")
+        print(f"  {name:<10} melody velocity by phrase bar │ {curve} │ rits {rits} "
+              f"│ outer-voice violations {len(outer)}{extra}")
         emit(results, engine.config.meter, f"perform_{name}_s{args.seed}", args.out_dir,
              header=f"wave A {name} │ seed {args.seed} │ affect {AFFECT}\n",
              no_audio=args.no_audio, quiet=True)

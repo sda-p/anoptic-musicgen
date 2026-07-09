@@ -10,7 +10,7 @@ from musicgen.gen.conductor import EngineConfig, MusicEngine
 from musicgen.gen.dramaturg import DramaturgConfig
 from musicgen.gen.melody import MelodyConfig
 from musicgen.modifiers import default_chains
-from musicgen.verify import lint, lint_groove
+from musicgen.verify import lint, lint_groove, lint_outer
 
 AFFECT = {"valence": 0.2, "energy": 0.6, "tension": 0.35}
 
@@ -46,8 +46,9 @@ def test_non_apex_bars_stay_below_the_apex():
 def test_apex_bar_carries_the_phrase_peak():
     # the apex realizes as the nearest chord tone, so it may occasionally land
     # below the ceiling — soft by design (the plan); it must dominate overall
+    # (a statistical property: sample wide so single-seed luck can't flip it)
     hits = total = 0
-    for seed in (1, 2, 3):
+    for seed in (1, 2, 3, 4, 5, 6, 7, 8):
         engine, results = _render(seed)
         for phrase in range(4):
             plan = engine.state.apexes[phrase]
@@ -57,7 +58,7 @@ def test_apex_bar_carries_the_phrase_peak():
             total += 1
             phrase_max = max(p for pitches in by_bar.values() for p in pitches)
             hits += plan.pos in by_bar and max(by_bar[plan.pos]) == phrase_max
-    assert total >= 10 and hits / total >= 0.75, f"{hits}/{total}"
+    assert total >= 28 and hits / total >= 0.75, f"{hits}/{total}"
 
 
 def test_apex_bar_never_rests():
@@ -92,13 +93,15 @@ def test_apex_off_is_default():
 
 
 def test_full_wave_a_stack_lints_clean():
-    # A1+A2+A4 + dramaturg together — the playground configuration — through a
-    # withhold-and-release arc, both lint stages plus the groove contract
+    # A1+A2+A3+A4 + dramaturg together — the playground configuration — through
+    # a withhold-and-release arc: both lint stages, the groove contract, and
+    # the outer-voice frame
     for seed in (1, 2, 3, 4):
         engine = MusicEngine(seed=seed, config=EngineConfig(
             mapper=MappingTable(), dramaturg=DramaturgConfig(),
             chains=default_chains(perform=True), cadence_rit=0.025,
-            phrase_groove=True, melody=MelodyConfig(plan_apex=True)))
+            phrase_groove=True,
+            melody=MelodyConfig(plan_apex=True, counterpoint=True)))
         engine.set_affect(valence=0.1, energy=0.7, tension=0.85)
         results = [engine.advance_bar() for _ in range(16)]
         engine.set_affect(tension=0.15)  # release: the spend phrase
@@ -108,5 +111,6 @@ def test_full_wave_a_stack_lints_clean():
         final = [e for r in results for e in r.events]
         violations = (lint(raw, contexts, stage="pre")
                       + lint(final, contexts, stage="post")
-                      + lint_groove(raw, contexts, {r.bar: r.params for r in results}))
+                      + lint_groove(raw, contexts, {r.bar: r.params for r in results})
+                      + lint_outer(raw, contexts))
         assert violations == [], f"seed {seed}:\n" + "\n".join(map(str, violations))

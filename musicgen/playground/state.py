@@ -22,11 +22,13 @@ from musicgen.gen.melody import MelodyConfig
 from musicgen.modifiers import default_chains
 from musicgen.playground.telemetry import to_jsonable
 
-# the performed-surface mirror (REFINEMENT_PLAN wave A): all off by default =
-# byte-identical output; the panel toggles them live. cadence_rit is the depth
-# the rit knob applies WHEN shaping is on (shaping off forces it to 0).
+# the performed/craft-surface mirror (REFINEMENT_PLAN waves A: A1 shaping+rit,
+# A2 groove, A3 counterpoint, A4 apex): all off by default = byte-identical
+# output; the panel toggles them live. cadence_rit is the depth the rit knob
+# applies WHEN shaping is on (shaping off forces it to 0).
 _PERFORM_DEFAULTS = {"shaping": False, "cadence_rit": 0.025,
-                     "phrase_groove": False, "plan_apex": False}
+                     "phrase_groove": False, "plan_apex": False,
+                     "counterpoint": False}
 
 # a tighter look-ahead than the demos: generation is µs-fast, so a small buffer
 # keeps live lever moves audible within a beat instead of the default 2.5 s
@@ -104,7 +106,8 @@ class PlaygroundState:
                            chains=default_chains(perform=bool(p["shaping"])),
                            cadence_rit=float(p["cadence_rit"]) if p["shaping"] else 0.0,
                            phrase_groove=bool(p["phrase_groove"]),
-                           melody=MelodyConfig(plan_apex=bool(p["plan_apex"])))
+                           melody=MelodyConfig(plan_apex=bool(p["plan_apex"]),
+                                               counterpoint=bool(p["counterpoint"])))
         engine = MusicEngine(seed=self.seed, config=cfg)
         for name, value in self.pinned.items():
             engine.set_override(name, value)

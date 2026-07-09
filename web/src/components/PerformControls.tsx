@@ -16,6 +16,7 @@ export function PerformControls() {
   const shaping = Boolean(s.perform.shaping);
   const groove = Boolean(s.perform.phrase_groove);
   const apex = Boolean(s.perform.plan_apex);
+  const counterpoint = Boolean(s.perform.counterpoint);
   return (
     <div className="dramaturg-ctl">
       <div className="dramaturg-head">
@@ -50,6 +51,16 @@ export function PerformControls() {
         {apex
           ? "apex planning on · one melodic peak per phrase, hairpin crests with it"
           : "apex planning off · unplanned contour"}
+      </label>
+      <label className={`toggle toggle-sub ${counterpoint ? "on" : ""}`}>
+        <input
+          type="checkbox"
+          checked={counterpoint}
+          onChange={(e) => api.setPerform({ counterpoint: e.target.checked })}
+        />
+        {counterpoint
+          ? "outer-voice counterpoint on · no parallel 5ths/8ves, contrary cadences"
+          : "outer-voice counterpoint off · the melody-bass frame is unguarded"}
       </label>
       {shaping && s.performUi.length > 0 && (
         <ConstantsGrid
