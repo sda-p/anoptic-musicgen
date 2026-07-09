@@ -138,6 +138,10 @@ class HarmonicContext:
     modulation: str = ""      # key-change annotation ("pivot ≡ ii of G ionian", ...)
     obligation: str = ""      # M14 harmonic obligation (§5.8): "" | "tonicize:N" — a secondary
     #                           dominant that verify._lint_obligations checks resolves to degree N
+    phrase_pos: int = 0       # 0-based bar position within the phrase (REFINEMENT_PLAN A1:
+    phrase_bars: int = 8      # phrase-aware modifiers like Perform read these)
+    phrase_apex: int = -1     # bar-in-phrase of the planned melodic apex (-1 = unplanned; A4 —
+    #                           Perform's hairpin crests here instead of at a fixed position)
 
 
 @dataclass

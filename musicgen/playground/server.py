@@ -33,7 +33,7 @@ _EXPORT_DIR = _TMP / "musicgen_playground_exports"
 # control messages that mutate server-mirrored state -> re-sync every client
 _SNAPSHOT_AFTER = {"set_override", "clear_override", "set_mapping", "reset_mapping",
                    "mapping_store", "mapping_recall", "set_console", "transport", "reseed",
-                   "set_automation", "seek", "set_dramaturg"}
+                   "set_automation", "seek", "set_dramaturg", "set_perform"}
 
 
 def _safe_name(name: str) -> str:
@@ -260,6 +260,8 @@ def _handle(msg: dict) -> None:
         state.set_console_fields(msg["fields"])
     elif kind == "set_dramaturg":
         state.set_dramaturg_fields(msg["fields"])
+    elif kind == "set_perform":
+        state.set_perform_fields(msg["fields"])
     elif kind == "reseed":
         state.reseed(msg["seed"])
     elif kind == "set_automation":

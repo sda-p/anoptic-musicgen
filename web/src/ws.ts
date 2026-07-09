@@ -50,6 +50,10 @@ function handle(msg: ServerMessage): void {
         dramaturgDefaults: Object.fromEntries(
           msg.dramaturg_ui.flatMap((g) => g.fields.map((f) => [f.name, f.default])),
         ),
+        performUi: msg.perform_ui,
+        performDefaults: Object.fromEntries(
+          msg.perform_ui.flatMap((g) => g.fields.map((f) => [f.name, f.default])),
+        ),
         phraseBars: msg.phrase_bars,
       });
       break;
@@ -66,6 +70,7 @@ function handle(msg: ServerMessage): void {
         startBar: msg.start_bar,
         automation: msg.automation,
         dramaturg: msg.dramaturg,
+        perform: msg.perform,
       });
       break;
     case "bar": {
@@ -135,6 +140,11 @@ export const api = {
   setDramaturg: (fields: Record<string, number | boolean>) => {
     mainStore.set({ dramaturg: { ...mainStore.get().dramaturg, ...fields } });
     send({ type: "set_dramaturg", fields });
+  },
+  // hot-swap the performed-surface knobs (wave A: shaping/rit/groove/apex); live
+  setPerform: (fields: Record<string, number | boolean>) => {
+    mainStore.set({ perform: { ...mainStore.get().perform, ...fields } });
+    send({ type: "set_perform", fields });
   },
   // drawable affect automation (optimistic; the server echoes a snapshot).
   // emit=false updates the store only — a drag previews locally at rAF cadence

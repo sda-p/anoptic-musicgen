@@ -275,6 +275,11 @@ def schema() -> dict:
         {"name": n, "default": to_jsonable(getattr(dc, n)), "kind": "scalar",
          "step": _step_for(getattr(dc, n))} for n in _DRAMATURG_FIELDS]}]
 
+    # the performed surface (REFINEMENT_PLAN wave A): toggles rendered by the
+    # panel itself; only the tunable scalar goes through the constants grid
+    perform_ui = [{"group": "perform · the played surface", "fields": [
+        {"name": "cadence_rit", "default": 0.025, "kind": "scalar", "step": 0.005}]}]
+
     return {
         "type": "schema",
         "affect": {
@@ -287,6 +292,7 @@ def schema() -> dict:
         "mapping": _dataclass_fields(MappingTable),
         "mapping_ui": mapping_ui,
         "dramaturg_ui": dramaturg_ui,
+        "perform_ui": perform_ui,
         "console": console_fields,
         "console_ui": console_ui,
         "instrument_tiers": to_jsonable(mt.instrument_tiers),

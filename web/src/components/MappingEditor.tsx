@@ -2,6 +2,7 @@ import { useMain } from "../store";
 import { api } from "../ws";
 import { ConstantsGrid } from "./ConstantsGrid";
 import { DramaturgControls } from "./DramaturgControls";
+import { PerformControls } from "./PerformControls";
 
 const SLOTS = ["A", "B"];
 
@@ -17,6 +18,7 @@ export function MappingEditor() {
   return (
     <div className="meditor">
       <DramaturgControls />
+      <PerformControls />
       <div className="meditor-bar">
         <span className="meditor-hint">
           edit the affect→music heuristics — each change hot-swaps at the next bar

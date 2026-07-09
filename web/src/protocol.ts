@@ -103,6 +103,7 @@ export interface SchemaMsg {
   mapping: FieldDef[];
   mapping_ui: MappingGroup[];
   dramaturg_ui: MappingGroup[];
+  perform_ui: MappingGroup[];
   console: FieldDef[];
   console_ui: MappingGroup[];
   instrument_tiers: [string, [string, number][]][];
@@ -142,6 +143,7 @@ export interface SnapshotMsg {
   start_bar: number;
   automation: AutomationTrack;
   dramaturg: Record<string, number | boolean>;
+  perform: Record<string, number | boolean>;
 }
 
 export interface BarMsg {

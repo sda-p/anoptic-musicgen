@@ -122,6 +122,33 @@ def test_dramaturg_controls():
     assert "bogus_knob" not in st.snapshot()["dramaturg"]
 
 
+def test_perform_controls():
+    s = telemetry.schema()
+    assert {f["name"] for g in s["perform_ui"] for f in g["fields"]} == {"cadence_rit"}
+
+    st = PlaygroundState()
+    p = st.snapshot()["perform"]  # all off by default -> byte-identical baseline
+    assert p == {"shaping": False, "cadence_rit": 0.025, "phrase_groove": False, "plan_apex": False}
+    engine = st._build_engine()
+    assert engine.config.cadence_rit == 0.0 and not engine.config.phrase_groove
+    assert not engine.config.melody.plan_apex
+
+    st.set_perform_fields({"shaping": True, "phrase_groove": True,
+                           "plan_apex": True, "cadence_rit": 0.03})
+    engine = st._build_engine()
+    from musicgen.modifiers import Perform
+    assert any(isinstance(m, Perform) for m in engine.config.chains["melody"])
+    assert engine.config.cadence_rit == 0.03 and engine.config.phrase_groove
+    assert engine.config.melody.plan_apex
+    st.set_perform_fields({"bogus_knob": 1.0})              # unknown field ignored, no crash
+    assert "bogus_knob" not in st.snapshot()["perform"]
+
+    # the mirror survives a session round-trip (preset save/load)
+    clone = PlaygroundState()
+    clone.import_session(st.export_session())
+    assert clone.snapshot()["perform"] == st.snapshot()["perform"]
+
+
 def test_sampler_load_clear():
     st = PlaygroundState()
     assert st.snapshot()["sample"] == {"name": "", "root": 72}

@@ -104,6 +104,53 @@ class Accent:
 
 
 @dataclass(frozen=True)
+class Perform:
+    """Phrase-position-aware performance shaping (REFINEMENT_PLAN A1).
+
+    Deterministic — systematic deviation tied to structure, where Humanize is
+    noise: a velocity hairpin cresting into the pre-cadence bar and relaxing at
+    the cadence, contour-tracking loudness (higher ≈ slightly louder), agogic
+    stretch on phrase-open downbeats, a luftpause carved from the cadence bar's
+    tails (a sliver of silence before the next phrase downbeat), and the layer
+    riding behind the beat when sparse / on top when dense. Draws nothing from
+    rng. Chain placement: after Articulate (legato must not refill the
+    luftpause), before the time-jitter of Humanize."""
+
+    hairpin: float = 0.12    # velocity swell depth: ±hairpin/2 across the phrase
+    contour: float = 0.0     # velocity per semitone above/below register center
+    agogic: float = 0.0      # dur stretch fraction on phrase-open downbeat notes
+    luftpause: float = 0.05  # beats of silence before the next phrase downbeat
+    lag: float = 0.0         # max beats behind (sparse) / ahead (dense) of the beat
+
+    def apply(self, events, ctx, meter, params, rng) -> list[NoteEvent]:
+        bars = max(1, ctx.phrase_bars)
+        phrase_len = bars * meter.bar_quarters
+        phrase_start = (ctx.bar - ctx.phrase_pos) * meter.bar_quarters
+        # swell peaks at the planned melodic apex (A4) when one exists, else
+        # mid-pre-cadence bar — the hairpin rises to the contour peak
+        crest = ((ctx.phrase_apex + 0.5) / bars if 0 <= ctx.phrase_apex < bars - 1
+                 else max(0.5, bars - 1.5) / bars)
+        bar_start = ctx.bar * meter.bar_quarters
+        cut = bar_start + meter.bar_quarters - self.luftpause
+        lag = self.lag * (1.0 - 2.0 * params.note_density)
+        out = []
+        for ev in events:
+            frac = min(max((ev.start - phrase_start) / phrase_len, 0.0), 1.0)
+            swell = frac / crest if frac <= crest else (1.0 - frac) / (1.0 - crest)
+            velocity = (ev.velocity * (1.0 + self.hairpin * (swell - 0.5))
+                        + self.contour * (ev.pitch - params.register_center))
+            start, dur = ev.start, ev.dur
+            if self.agogic and ctx.phrase_pos == 0 and meter.slot_of(ev.start) == 0:
+                dur *= 1.0 + self.agogic
+            if lag:
+                start = round(max(bar_start, start + lag), 6)
+            if self.luftpause and ctx.phrase_pos == bars - 1 and start < cut < start + dur:
+                dur = max(MIN_DUR, cut - start)
+            out.append(replace(ev, start=start, dur=dur, velocity=_clamp_velocity(velocity)))
+        return out
+
+
+@dataclass(frozen=True)
 class Echo:
     """Append decaying repeats (arp/melody sparkle)."""
 
@@ -187,12 +234,27 @@ def apply_chain(chain, events, ctx, meter, params, rng) -> list[NoteEvent]:
     return events
 
 
-def default_chains() -> dict[str, tuple]:
-    """PLANS.md §7 default chains; lever hookups via None params."""
+def default_chains(perform: bool = False) -> dict[str, tuple]:
+    """PLANS.md §7 default chains; lever hookups via None params.
+
+    perform=True inserts the A1 Perform shaping per pitched layer — full
+    treatment (contour, agogic, lay-back) on the melody line, hairpin +
+    luftpause elsewhere. Perc keeps its groove dynamics (drums are one-shots;
+    durations, and so a luftpause, are inaudible there). The default stays
+    byte-identical to the pre-A1 chains."""
+    if not perform:
+        return {
+            "pad": (Strum(), Humanize(t_sigma=0.010, v_sigma=3.0)),
+            "bass": (Humanize(t_sigma=0.008, v_sigma=3.0),),
+            "melody": (Articulate(), Accent(), Humanize()),
+            "arp": (Echo(),),
+            "perc": (Humanize(t_sigma=0.006, v_sigma=3.0),),
+        }
     return {
-        "pad": (Strum(), Humanize(t_sigma=0.010, v_sigma=3.0)),
-        "bass": (Humanize(t_sigma=0.008, v_sigma=3.0),),
-        "melody": (Articulate(), Accent(), Humanize()),
-        "arp": (Echo(),),
+        "pad": (Perform(hairpin=0.10), Strum(), Humanize(t_sigma=0.010, v_sigma=3.0)),
+        "bass": (Perform(hairpin=0.10), Humanize(t_sigma=0.008, v_sigma=3.0)),
+        "melody": (Articulate(), Accent(),
+                   Perform(hairpin=0.14, contour=0.4, agogic=0.10, lag=0.02), Humanize()),
+        "arp": (Perform(hairpin=0.10), Echo()),
         "perc": (Humanize(t_sigma=0.006, v_sigma=3.0),),
     }

@@ -39,10 +39,10 @@ these waves start from a clean baseline.
 
 | # | Item | Complexity | Payoff | Hard prereqs | Spec-gating |
 |---|------|-----------|--------|--------------|-------------|
-| A1 | Phrasing / performance shaping | S | ★★★★★ | — | no |
-| A2 | Groove persistence contract | S | ★★★ | — | no |
+| A1 | Phrasing / performance shaping ✚ *(done)* | S | ★★★★★ | — | no |
+| A2 | Groove persistence contract ✚ *(done)* | S | ★★★ | — | no |
 | A3 | Outer-voice counterpoint (lint + guards) | S–M | ★★★★ | — | rules → spec |
-| A4 | Single-apex contour planning | S | ★★★ | — | no |
+| A4 | Single-apex contour planning ✚ *(done)* | S | ★★★ | — | no |
 | B1 | Cadential 6/4 (prepared authentic cadence) | S | ★★★★ | — | no |
 | B2 | Antecedent–consequent periods | M | ★★★★★ | — | planner → spec |
 | B3 | Hypermetric weight | S | ★★★ | — | no |
@@ -68,7 +68,7 @@ files.
 Four independent, small items. Everything here is a pure function of state the
 engine already has; none of it moves the IR.
 
-### A1. Phrasing / performance shaping — the "sequenced vs played" delta
+### A1. Phrasing / performance shaping — the "sequenced vs played" delta ✚ *(done; PLANS.md M19)*
 
 **Payoff ★★★★★ / Complexity S.** Improvements.md's own bet for highest perceived
 quality per effort, and I agree: Humanize is noise; this is *systematic* deviation
@@ -112,7 +112,7 @@ Determinism: two renders bit-identical. Demo: `demo_perform.py` A/B.
 playground) must all tolerate >1 point per beat — verify each; the writer already
 accepts arbitrary `(beat, bpm)` lists.
 
-### A2. Groove persistence as an explicit contract
+### A2. Groove persistence as an explicit contract ✚ *(done; PLANS.md M19)*
 
 **Payoff ★★★ / Complexity S.** Pattern identity is what makes harmonic change
 legible. Today it holds only by accident: kick E(k,16) and hat step are pure
@@ -163,7 +163,7 @@ same interval machinery).
 lint in the same change, run the seed-sweep tests, and tune the guard until the
 sweep is clean before enabling the rule by default.
 
-### A4. Single-apex contour planning
+### A4. Single-apex contour planning ✚ *(done; PLANS.md M19)*
 
 **Payoff ★★★ / Complexity S.** One melodic peak per phrase, approached by leap-up,
 left by stepwise fill (gap-fill). Complements the dramaturg's ambit cap (which is

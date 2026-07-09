@@ -56,6 +56,32 @@ class PercConfig:
     )
 
 
+@dataclass(frozen=True)
+class Groove:
+    """Pattern-identity draws pinned for a phrase (REFINEMENT_PLAN A2). The
+    ghost-snare set, the hat-drop mask, and the open-hat choice re-rolled every
+    bar under per-bar seeding; pinning them per phrase makes groove identity an
+    explicit contract — pattern identity is what makes harmonic change legible.
+    Fills stay per-bar: they are the licensed variation."""
+
+    ghosts: tuple[int, ...]      # ghost-snare slots that sound this phrase
+    hat_drops: frozenset[int]    # hat slots silent this phrase
+    ohat: bool                   # the pre-downbeat hat opens this phrase
+
+
+def make_groove(rng: random.Random, meter: Meter, density: float, roughness: float,
+                cfg: PercConfig = PercConfig()) -> Groove:
+    """One phrase's groove, drawn from a per-(subsystem, phrase) stream with the
+    phrase-start params — the same probabilities generate_perc rolls per bar."""
+    ghost_prob = max(0.0, roughness - 0.25) * 0.6
+    ghosts = tuple(s for s in _ghost_slots(meter)
+                   if s < meter.slots and rng.random() < ghost_prob)
+    hat_step = 1 if density > 0.7 else 2
+    hat_drop = max(0.0, 1.0 - density) * 0.3
+    drops = frozenset(s for s in range(0, meter.slots, hat_step) if rng.random() < hat_drop)
+    return Groove(ghosts, drops, rng.random() < 0.25)
+
+
 def generate_perc(
     ctx: HarmonicContext,
     meter: Meter,
@@ -64,8 +90,12 @@ def generate_perc(
     had_fill: bool,
     cfg: PercConfig,
     rng: random.Random,
+    groove: Groove | None = None,
 ) -> tuple[list[NoteEvent], bool, str]:
-    """One bar of drums. Returns (events, fill_played, trace)."""
+    """One bar of drums. Returns (events, fill_played, trace). With a `groove`
+    the stochastic pattern draws (ghosts, hat drops, open hat) come pinned from
+    the phrase (A2) and the per-bar stream rolls only the fill; without one,
+    behavior is byte-identical to the per-bar rolls."""
     slots = meter.slots
     density, roughness = params.note_density, params.roughness
     vel_of = dict(cfg.base_velocities)
@@ -90,19 +120,27 @@ def generate_perc(
 
     backbeat = [p * meter.pulse_slots for p in range(1, meter.pulses, 2)]
     hits += [(s, "snare", vel_of["snare"]) for s in backbeat]
-    ghost_prob = max(0.0, roughness - 0.25) * 0.6
-    hits += [
-        (s, "snare", cfg.ghost_velocity)
-        for s in _ghost_slots(meter)
-        if s < slots and rng.random() < ghost_prob
-    ]
+    if groove is not None:
+        hits += [(s, "snare", cfg.ghost_velocity) for s in groove.ghosts]
+    else:
+        ghost_prob = max(0.0, roughness - 0.25) * 0.6
+        hits += [
+            (s, "snare", cfg.ghost_velocity)
+            for s in _ghost_slots(meter)
+            if s < slots and rng.random() < ghost_prob
+        ]
 
     hat_step = 1 if density > 0.7 else 2
     hat_drop = max(0.0, 1.0 - density) * 0.3
     for s in range(0, slots, hat_step):
-        if rng.random() < hat_drop:
-            continue
-        drum = "ohat" if s == slots - 2 and rng.random() < 0.25 else "chat"
+        if groove is not None:
+            if s in groove.hat_drops:
+                continue
+            drum = "ohat" if s == slots - 2 and groove.ohat else "chat"
+        else:
+            if rng.random() < hat_drop:
+                continue
+            drum = "ohat" if s == slots - 2 and rng.random() < 0.25 else "chat"
         accent = 6 if s % meter.pulse_slots == 0 else 0
         hits.append((s, drum, vel_of["chat"] + accent))
 

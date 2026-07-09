@@ -41,6 +41,28 @@ class MelodyConfig:
     bar_rest_max: float = 0.30
     span_min: int = 2
     span_max: int = 4
+    plan_apex: bool = False  # A4: one planned melodic apex per phrase (off = byte-identical)
+
+
+@dataclass(frozen=True)
+class ApexPlan:
+    """Single-peak contour plan (REFINEMENT_PLAN A4): one melodic apex per
+    phrase, approached by leap and left by stepwise fill. Every other bar caps
+    its ceiling below the apex; the apex bar lifts its highest contour note to
+    the planned pitch (chord-tone snapped), and the existing leap-recovery rule
+    supplies the gap-fill descent for free. Cached per phrase in ConductorState
+    (like motifs) — a pure function of (seed, phrase, phrase-start params)."""
+
+    pos: int    # bar within the phrase carrying the apex
+    pitch: int  # planned apex pitch — a hard ceiling minus one for the other bars
+
+
+def make_apex(rng: random.Random, bars: int, center: int, range_semitones: int) -> ApexPlan:
+    """The apex sits late (bars-3 / bars-2 — where the §5.6 micro-arc peaks) in
+    the register window's upper third."""
+    pos = max(1, rng.choices((bars - 3, bars - 2), weights=(0.45, 0.55))[0])
+    lo_off = max(3, range_semitones * 5 // 12)
+    return ApexPlan(pos, center + rng.randint(lo_off, max(lo_off + 1, range_semitones - 1)))
 
 
 @dataclass(frozen=True)
@@ -203,11 +225,13 @@ def _velocity(params: MusicalParams, emphasis: int = 0) -> int:
     return max(1, min(127, params.velocity_center + emphasis))
 
 
-def _place(cell, ctx, mscale, params, state, lo, hi, strong):
+def _place(cell, ctx, mscale, params, state, lo, hi, strong, peak: int | None = None):
     """Constraint-first placement of a rhythm+contour cell: strong beats snap to
     chord tones, weak beats step, leaps recover, the register folds toward center.
     Returns (placed, anchor). This is the disposable/disguised realization —
-    signature statements go through realize_faithful instead."""
+    signature statements go through realize_faithful instead. With `peak` (A4),
+    the cell's highest contour note is lifted to the nearest chord tone of the
+    planned apex; a leap into it recovers by the standard opposite step — gap-fill."""
     anchor_target = state.prev_pitch if state.prev_pitch is not None else params.register_center
     anchor_target = min(max(anchor_target, lo + 3), hi - 3)
     anchor = _nearest_pc_pitch(ctx.chord_pcs, anchor_target, lo, hi)
@@ -215,8 +239,15 @@ def _place(cell, ctx, mscale, params, state, lo, hi, strong):
     prev = state.prev_pitch
     recovery = 0  # forced step direction after a leap, else 0
     last_index = len(cell.rhythm) - 1
+    peak_i = -1
+    if peak is not None and len(cell.contour) > 1:
+        peak_i = max(range(len(cell.contour)), key=lambda i: cell.contour[i])
+        if peak_i == last_index:
+            peak_i = -1  # the final-note leap contraction below would undo it
     for i, ((slot, dur_slots), offset) in enumerate(zip(cell.rhythm, cell.contour)):
-        if recovery and prev is not None:
+        if i == peak_i and not (recovery and prev is not None):
+            pitch = _nearest_pc_pitch(ctx.chord_pcs, peak, lo, hi)
+        elif recovery and prev is not None:
             # A leap must resolve by an opposite step — even on a strong slot
             # (an appoggiatura-style resolution; the ratio rule has slack).
             pitch = _diatonic_shift(mscale, prev, recovery)
@@ -284,6 +315,7 @@ def generate_melody(
     rng: random.Random,
     lifecycle: str = "",
     signature: Motif | None = None,
+    apex: ApexPlan | None = None,
 ) -> tuple[list[NoteEvent], MelodyState, str]:
     """One bar of melody. `lifecycle` stages the persistent `signature` (M15/M17)
     *positionally* within the phrase — the phrase keeps its own disposable `motif`,
@@ -300,6 +332,13 @@ def generate_melody(
       statement); the drive never rests."""
     lo = params.register_center - cfg.range_semitones
     hi = params.register_center + cfg.range_semitones
+    if lifecycle == "completed":
+        apex = None  # the cadence-fused statement owns the phrase's shape (A4 stands down)
+    apex_bar = apex is not None and pos.pos == apex.pos
+    if apex is not None and not apex_bar:
+        # single peak: every other bar stays below the apex (floored so the
+        # window never collapses past the dramaturg's own minimum range)
+        hi = max(min(hi, apex.pitch - 1), lo + 6)
     sig = signature if signature is not None else motif
     sig_event = lifecycle in ("introduced", "developed", "stated") and pos.pos == pos.bars // 2
 
@@ -309,9 +348,9 @@ def generate_melody(
         return _cadence_bar(ctx, meter, params, state, lo, hi, rng)
 
     rest_prob = max(0.0, cfg.bar_rest_max - params.note_density * 0.4)
-    if (lifecycle != "completed" and not sig_event and pos.slot == "free"
+    if (lifecycle != "completed" and not sig_event and not apex_bar and pos.slot == "free"
             and rng.random() < rest_prob):
-        return [], state, "melody: rest bar"  # signature events and the payoff drive never rest
+        return [], state, "melody: rest bar"  # signature events, the payoff drive, and the apex never rest
 
     mscale = ctx.chord.scale_for(ctx.scale) if ctx.chord else ctx.scale
     strong = set(meter.strong_slots())
@@ -336,7 +375,10 @@ def generate_melody(
         op, shape, faithful = "signature faithful", sig.shape, True
     else:
         variant, op = phrase_variant(motif, pos.pos, rng, meter.slots)
-        placed, anchor = _place(variant, ctx, mscale, params, state, lo, hi, strong)
+        placed, anchor = _place(variant, ctx, mscale, params, state, lo, hi, strong,
+                                peak=apex.pitch if apex_bar else None)
+        if apex_bar:
+            op += "+apex"
         shape = motif.shape
 
     bar_start = ctx.bar * meter.bar_quarters

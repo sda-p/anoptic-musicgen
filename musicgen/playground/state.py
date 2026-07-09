@@ -18,7 +18,15 @@ from musicgen.control.levers import validate_override
 from musicgen.control.mapping import MappingTable
 from musicgen.gen.conductor import EngineConfig, MusicEngine
 from musicgen.gen.dramaturg import DramaturgConfig
+from musicgen.gen.melody import MelodyConfig
+from musicgen.modifiers import default_chains
 from musicgen.playground.telemetry import to_jsonable
+
+# the performed-surface mirror (REFINEMENT_PLAN wave A): all off by default =
+# byte-identical output; the panel toggles them live. cadence_rit is the depth
+# the rit knob applies WHEN shaping is on (shaping off forces it to 0).
+_PERFORM_DEFAULTS = {"shaping": False, "cadence_rit": 0.025,
+                     "phrase_groove": False, "plan_apex": False}
 
 # a tighter look-ahead than the demos: generation is µs-fast, so a small buffer
 # keeps live lever moves audible within a beat instead of the default 2.5 s
@@ -83,13 +91,20 @@ class PlaygroundState:
         self.exporting = False  # an offline bounce owns the one graph; blocks start()
         # dramaturg present but OFF by default -> byte-identical to no dramaturg (§5.8, M13)
         self._dramaturg_config = DramaturgConfig(enabled=False)
+        # performed surface (wave A) — off by default, hot-swappable like the dramaturg
+        self._perform = dict(_PERFORM_DEFAULTS)
         self.player = None
 
     # ------------------------------------------------------------- lifecycle
     def _build_engine(self) -> MusicEngine:
+        p = self._perform
         cfg = EngineConfig(mapper=self.mapper, valence=self.affect["valence"],
                            energy=self.affect["energy"], tension=self.affect["tension"],
-                           dramaturg=self._dramaturg_config)
+                           dramaturg=self._dramaturg_config,
+                           chains=default_chains(perform=bool(p["shaping"])),
+                           cadence_rit=float(p["cadence_rit"]) if p["shaping"] else 0.0,
+                           phrase_groove=bool(p["phrase_groove"]),
+                           melody=MelodyConfig(plan_apex=bool(p["plan_apex"])))
         engine = MusicEngine(seed=self.seed, config=cfg)
         for name, value in self.pinned.items():
             engine.set_override(name, value)
@@ -239,6 +254,19 @@ class PlaygroundState:
         if self.player is not None:
             self.player.set_dramaturg(self._dramaturg_config)
 
+    def set_perform_fields(self, updates: dict) -> None:
+        """Hot-swap the performed-surface knobs (REFINEMENT_PLAN wave A: A1
+        shaping + cadence rit, A2 phrase groove, A4 apex planning) — applied at
+        the next bar edge on the generation thread, like the dramaturg; no
+        rebuild. Off across the board is byte-identical."""
+        applied = {k: (float(v) if k == "cadence_rit" else bool(v))
+                   for k, v in updates.items() if k in self._perform}
+        if not applied:
+            return
+        self._perform.update(applied)
+        if self.player is not None:
+            self.player.set_perform(dict(self._perform))
+
     def set_sample(self, path: str, root_midi: int) -> None:
         """Load an uploaded audio file into the sampler ("keys") voice — a
         structural change that rebuilds the console."""
@@ -319,6 +347,7 @@ class PlaygroundState:
             "automation": {"enabled": self.automation["enabled"],
                            "loop_bars": self.automation["loop_bars"],
                            "points": [dict(p) for p in self.automation["points"]]},
+            "perform": dict(self._perform),
         }
 
     def import_session(self, data: dict) -> None:
@@ -346,6 +375,9 @@ class PlaygroundState:
             self.set_automation(data["automation"].get("enabled"),
                                 data["automation"].get("loop_bars"),
                                 data["automation"].get("points"))
+        if "perform" in data:
+            self._perform.update({k: (float(v) if k == "cadence_rit" else bool(v))
+                                  for k, v in data["perform"].items() if k in self._perform})
         self._restart()  # rebuild a running player with the imported config
 
     def render_export(self, kind: str, bars: int, path) -> Path:
@@ -395,4 +427,5 @@ class PlaygroundState:
                            "points": [dict(p) for p in self.automation["points"]]},
             "dramaturg": {f.name: to_jsonable(getattr(self._dramaturg_config, f.name))
                           for f in fields(DramaturgConfig)},
+            "perform": dict(self._perform),
         }

@@ -27,23 +27,24 @@ from musicgen.control import mapping
 from musicgen.control.levers import Affect, validate_override
 from musicgen.control.mapping import MappingTable
 from musicgen.gen import structure
-from musicgen.gen.arp import ArpConfig, PATTERNS as ARP_PATTERNS, generate_arp
+from musicgen.gen.arp import ArpConfig, PATTERNS as ARP_PATTERNS, generate_arp, make_skips
 from musicgen.gen.bass import BassConfig, generate_bass
 from musicgen.gen.dramaturg import Dramaturg, DramaturgConfig, Ledger, spend_magnitude
 from musicgen.gen.melody import (
-    MelodyConfig, MelodyState, Motif, generate_melody, make_motif, make_signature,
+    ApexPlan, MelodyConfig, MelodyState, Motif, generate_melody, make_apex,
+    make_motif, make_signature,
 )
 from musicgen.gen.motif import MotifLifecycle
 from musicgen.gen.signatures import MotifDirector, SignatureMotif
 from musicgen.gen.pad import generate_pad
-from musicgen.gen.perc import PercConfig, generate_perc
+from musicgen.gen.perc import Groove, PercConfig, generate_perc, make_groove
 from musicgen.ir import LAYER_NAMES, HarmonicContext, Meter, MusicalParams, NoteEvent
 from musicgen.modifiers import apply_chain, default_chains
 from musicgen.rng import Seeder
 from musicgen.theory.chords import Chord
 from musicgen.theory.harmony import CADENCE_TARGET, HarmonyConfig, next_chord
 from musicgen.theory.modulation import Pivot, fifths_between, find_pivots
-from musicgen.theory.pitch import name_to_midi
+from musicgen.theory.pitch import name_to_midi, pitch_name
 from musicgen.theory.scales import Scale
 from musicgen.theory.voicing import VoicingConfig
 
@@ -89,6 +90,10 @@ class EngineConfig:
     dramaturg: DramaturgConfig | None = None  # None: off (byte-identical); set: tension-debt ledger (§5.8, M13)
     motif_library: tuple[SignatureMotif, ...] = ()  # authored signature motifs (§5.5, M17); empty: byte-identical
     motif_leniency: float = 0.5  # signature-selection leniency when no dramaturg supplies one (M17)
+    cadence_rit: float = 0.0  # A1 perform: fractional tempo dip reached by a cadence bar's last
+    #                           beat, a tempo at the next downbeat (0 = off, byte-identical)
+    phrase_groove: bool = False  # A2: pin perc/arp pattern draws per phrase — groove identity as
+    #                              a contract; fills stay per-bar (off = per-bar rolls, byte-identical)
     mapper: MappingTable | None = None
     chains: dict[str, tuple] = field(default_factory=default_chains)  # {} disables modifiers
     harmony: HarmonyConfig = field(default_factory=HarmonyConfig)
@@ -111,6 +116,9 @@ class ConductorState:
     prev_bass_root: int | None = None
     melody: MelodyState = field(default_factory=MelodyState)
     motifs: dict[int, Motif] = field(default_factory=dict)
+    grooves: dict[int, Groove] = field(default_factory=dict)          # A2: re-derivable per-phrase cache
+    arp_skips: dict[int, frozenset[int]] = field(default_factory=dict)  # A2: ditto
+    apexes: dict[int, ApexPlan] = field(default_factory=dict)         # A4: ditto
     motif_lifecycle: MotifLifecycle | None = None  # persistent signature (M15; None when disabled)
     motif_director: MotifDirector | None = None    # authored-signature selection (M17; None when no library)
     pending_signature: Motif | None = None         # the signature to state this phrase, or None
@@ -132,6 +140,7 @@ class ConductorState:
     current_instruments: tuple[tuple[str, str], ...] = ()
     phrase_policies: dict[int, str] = field(default_factory=dict)
     last_emitted_tempo: float | None = None
+    tempo_restore: float | None = None  # static-path a-tempo point owed after a cadence rit (A1)
 
 
 @dataclass
@@ -259,6 +268,20 @@ class MusicEngine:
         if self.config.mapper is not None:
             return mapping.harmonic_rhythm_target(self.affect, self.config.mapper)
         return self.config.params.harmonic_rhythm
+
+    def _rit_depth(self, pos: structure.PhrasePos) -> float:
+        """A1 micro-ritardando: the fractional slowdown reached by the cadence
+        bar's last beat (the next downbeat recovers a tempo). Authentic cadences
+        breathe fully, half cadences half as much, deceptive stay a tempo — the
+        surprise wants no warning. A dramaturg spend deepens the breath with its
+        payoff, so a bigger arrival gets a longer exhale."""
+        if self.config.cadence_rit <= 0 or pos.slot != "cadence":
+            return 0.0
+        depth = {"authentic": 1.0, "half": 0.5}.get(self._policy(pos.phrase), 0.0)
+        depth *= self.config.cadence_rit
+        if depth and self._dramaturg_on and self.state.ledger.phrase_cadence.get(pos.phrase) == "authentic":
+            depth *= 1.0 + 0.5 * self.state.ledger.last_spend
+        return depth
 
     def _gen_chord(self, bar: int) -> tuple[int, Chord, str]:
         cfg = self.config
@@ -394,7 +417,7 @@ class MusicEngine:
             step = 1 if self.seeder.stream("wander", phrase).random() < 0.5 + lean else -1
         return (state.key_tonic + 7 * step) % 12
 
-    def _mapped_params(self, bar: int) -> tuple[MusicalParams, list[tuple[float, float]]]:
+    def _mapped_params(self, bar: int, rit: float = 0.0) -> tuple[MusicalParams, list[tuple[float, float]]]:
         cfg, state, a, ov = self.config, self.state, self.affect, self.overrides
         table = cfg.mapper
         assert table is not None
@@ -425,10 +448,13 @@ class MusicEngine:
         beats = int(cfg.meter.bar_quarters)
         for beat in range(max(1, beats)):
             state.current_tempo = mapping.slew(state.current_tempo, tempo_goal, table.tempo_slew_per_beat)
-            changed = state.last_emitted_tempo is None or abs(state.current_tempo - state.last_emitted_tempo) > 0.01
+            # A1 cadence rit shades the *emitted* tempo only (slew state stays
+            # pure); the next bar's beat-0 comparison then re-emits a tempo.
+            emitted = state.current_tempo * (1.0 - rit * (beat / (beats - 1) if beats > 1 else 1.0))
+            changed = state.last_emitted_tempo is None or abs(emitted - state.last_emitted_tempo) > 0.01
             if changed:
-                tempo_points.append((bar * cfg.meter.bar_quarters + beat, round(state.current_tempo, 2)))
-                state.last_emitted_tempo = state.current_tempo
+                tempo_points.append((bar * cfg.meter.bar_quarters + beat, round(emitted, 2)))
+                state.last_emitted_tempo = emitted
 
         params = MusicalParams(
             tempo_bpm=round(state.current_tempo, 2),
@@ -507,11 +533,23 @@ class MusicEngine:
             self._urgent = False
         self.scale = Scale(self._tonic_for_bar(bar), state.current_mode)
 
+        rit = self._rit_depth(pos)
         if cfg.mapper is not None:
-            params, tempo_points = self._mapped_params(bar)
+            params, tempo_points = self._mapped_params(bar, rit)
         else:
             params = cfg.params
             tempo_points = [(0.0, params.tempo_bpm)] if bar == 0 else []
+            if state.tempo_restore is not None:  # a tempo after last bar's rit (A1)
+                tempo_points.append((bar * cfg.meter.bar_quarters, state.tempo_restore))
+                state.tempo_restore = None
+            if rit:
+                beats = max(2, int(cfg.meter.bar_quarters))
+                tempo_points += [
+                    (bar * cfg.meter.bar_quarters + beat,
+                     round(params.tempo_bpm * (1.0 - rit * beat / (beats - 1)), 2))
+                    for beat in range(1, beats)
+                ]
+                state.tempo_restore = params.tempo_bpm
 
         # Dramaturg withholding (§5.8, M13): hold a tier out of the gate set and,
         # on a sustained hold, escalate intensity — both released on the spend.
@@ -537,6 +575,21 @@ class MusicEngine:
                 spend = directive is not None and directive.payoff > 0
                 state.motif_lifecycle.advance(spend, pos.phrase)
             lifecycle_state = state.motif_lifecycle.state
+
+        # Single-apex contour plan (A4): drawn once per phrase from the
+        # phrase-start params; ctx carries the apex bar so Perform's hairpin
+        # crests with the melody's peak instead of at a fixed position.
+        apex = None
+        apex_note = ""
+        if cfg.melody.plan_apex:
+            if pos.phrase not in state.apexes:
+                state.apexes[pos.phrase] = make_apex(
+                    self.seeder.stream("apex", pos.phrase), pos.bars,
+                    params.register_center, cfg.melody.range_semitones)
+                plan = state.apexes[pos.phrase]
+                apex_note = (f"apex: phrase {pos.phrase} peaks bar {plan.pos + 1} "
+                             f"at {pitch_name(plan.pitch)}")
+            apex = state.apexes[pos.phrase]
 
         while len(state.chord_queue) < 2:
             next_needed = state.chord_queue[-1][0] + 1 if state.chord_queue else bar
@@ -568,12 +621,19 @@ class MusicEngine:
             cadence_policy=self._policy(pos.phrase) if slot else "",
             modulation=mod_note,
             obligation=f"tonicize:{chord.applied}" if chord.applied else "",
+            phrase_pos=pos.pos,
+            phrase_bars=pos.bars,
+            phrase_apex=apex.pos if apex is not None else -1,
         )
 
         events: list[NoteEvent] = []
         trace = [f"bar {bar + 1} [{pos.slot}] {ctx.chord_sym} ({self.scale.name}): {chord_trace}"]
         if dramaturg_note:
             trace.append(dramaturg_note)
+        if rit:
+            trace.append(f"perform: cadence rit -{rit * 100:.1f}% (a tempo next bar)")
+        if apex_note:
+            trace.append(apex_note)
         if instr_note:
             trace.append(instr_note)
 
@@ -658,7 +718,7 @@ class MusicEngine:
             mel_events, mel_state, mel_trace = generate_melody(
                 ctx, cfg.meter, params, pos, self._motif(pos.phrase, params),
                 state.melody, mel_cfg, self.seeder.stream("melody", bar),
-                lifecycle=mel_lifecycle, signature=signature,
+                lifecycle=mel_lifecycle, signature=signature, apex=apex,
             )
             events.extend(mel_events)
             state.melody = mel_state
@@ -666,16 +726,33 @@ class MusicEngine:
             trace.append(mel_trace + tag)
         if "arp" in layers:
             pattern_rng = self.seeder.stream("arp-pattern", pos.phrase)
+            skips = None
+            if cfg.phrase_groove:  # A2: the rest mask is part of the held pattern
+                if pos.phrase not in state.arp_skips:
+                    state.arp_skips[pos.phrase] = make_skips(
+                        self.seeder.stream("arp-groove", pos.phrase),
+                        cfg.meter, params.note_density)
+                skips = state.arp_skips[pos.phrase]
             arp_events, arp_trace = generate_arp(
                 ctx, cfg.meter, params, pattern_rng.choice(ARP_PATTERNS),
-                cfg.arp, self.seeder.stream("arp", bar),
+                cfg.arp, self.seeder.stream("arp", bar), skips=skips,
             )
             events.extend(arp_events)
             trace.append(arp_trace)
         if "perc" in layers:
+            groove = None
+            if cfg.phrase_groove:  # A2: pattern draws pinned; the fill stays per-bar
+                if pos.phrase not in state.grooves:
+                    state.grooves[pos.phrase] = make_groove(
+                        self.seeder.stream("perc-pattern", pos.phrase), cfg.meter,
+                        params.note_density, params.roughness, cfg.perc)
+                    g = state.grooves[pos.phrase]
+                    trace.append(f"groove: phrase {pos.phrase} pinned (ghosts {len(g.ghosts)}, "
+                                 f"hat drops {len(g.hat_drops)}, ohat {g.ohat})")
+                groove = state.grooves[pos.phrase]
             perc_events, fill, perc_trace = generate_perc(
                 ctx, cfg.meter, params, pos, state.last_fill,
-                cfg.perc, self.seeder.stream("perc", bar),
+                cfg.perc, self.seeder.stream("perc", bar), groove=groove,
             )
             events.extend(perc_events)
             state.last_fill = fill

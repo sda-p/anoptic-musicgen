@@ -310,6 +310,53 @@ def _lint_obligations(events, ctx_by_bar, meter, out) -> None:
                     f"secondary dominant {ctx.chord_sym or '(?)'} does not resolve to degree {target}"))
 
 
+def lint_groove(
+    events: Sequence[NoteEvent],
+    contexts: Sequence[HarmonicContext],
+    params_by_bar: dict,
+    meter: Meter = Meter(),
+) -> list[Violation]:
+    """A2 groove-persistence contract (REFINEMENT_PLAN): within a phrase, under
+    bar-to-bar-stable shaping params (density, roughness, dynamics, layer set),
+    the non-fill percussion pattern and the arp's onset mask must be identical
+    across bars — pattern identity is what makes harmonic change legible.
+    Cadence bars are exempt for perc (the fill is the licensed variation), as is
+    the phrase-open crash. Run on pre-modifier IR; standalone (needs per-bar
+    params, which lint()'s inputs don't carry) — called by tests and demos, and
+    by lint() itself once phrase_groove becomes the default."""
+    ctx_by_bar = {c.bar: c for c in contexts}
+    perc_pat: dict[int, list] = {}
+    arp_pat: dict[int, set] = {}
+    for ev in events:
+        bar = meter.bar_of(ev.start)
+        if ev.layer == "perc" and ev.role != "drum:crash":
+            perc_pat.setdefault(bar, []).append((meter.slot_of(ev.start), ev.pitch, ev.velocity))
+        elif ev.layer == "arp" and ev.role != "echo":
+            arp_pat.setdefault(bar, set()).add(meter.slot_of(ev.start))
+
+    out: list[Violation] = []
+
+    def check(rule: str, patterns: dict[int, tuple], skip_cadence: bool) -> None:
+        last: dict[int, tuple] = {}  # phrase start bar -> (params fingerprint, pattern, bar)
+        for bar in sorted(ctx_by_bar):
+            ctx, p = ctx_by_bar[bar], params_by_bar.get(bar)
+            if p is None or (skip_cadence and ctx.phrase_pos == ctx.phrase_bars - 1):
+                continue
+            fingerprint = (p.note_density, p.roughness, p.velocity_center, p.layers)
+            pattern = patterns.get(bar, ())
+            phrase = bar - ctx.phrase_pos
+            prev = last.get(phrase)
+            if prev is not None and prev[0] == fingerprint and prev[1] != pattern:
+                out.append(Violation(rule, bar,
+                    f"{rule} pattern re-rolled mid-phrase under stable params "
+                    f"(bar {prev[2] + 1} -> bar {bar + 1})"))
+            last[phrase] = (fingerprint, pattern, bar)
+
+    check("groove-perc", {b: tuple(sorted(v)) for b, v in perc_pat.items()}, skip_cadence=True)
+    check("groove-arp", {b: tuple(sorted(v)) for b, v in arp_pat.items()}, skip_cadence=False)
+    return out
+
+
 def lint(
     events: Sequence[NoteEvent],
     contexts: Sequence[HarmonicContext],

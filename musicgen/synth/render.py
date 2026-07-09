@@ -205,6 +205,14 @@ class RealtimeSynthPlayer:
         with self._lock:
             self._commands.append(("dramaturg", cfg))
 
+    def set_perform(self, fields: dict) -> None:
+        """Hot-swap the performed-surface knobs (REFINEMENT_PLAN wave A) between
+        bars: {shaping, cadence_rit, phrase_groove, plan_apex}. All are read
+        per-bar by the conductor, so the swap is atomic; the per-phrase caches
+        (grooves, apexes) persist across toggles."""
+        with self._lock:
+            self._commands.append(("perform", dict(fields)))
+
     def request_key(self, tonic, *, urgent: bool = False) -> None:
         with self._lock:
             self._commands.append(("key", tonic, urgent))
@@ -240,6 +248,14 @@ class RealtimeSynthPlayer:
                 else:
                     from musicgen.gen.dramaturg import Dramaturg
                     self.engine.dramaturg = Dramaturg(command[1])
+            elif command[0] == "perform":
+                from dataclasses import replace as _replace
+                from musicgen.modifiers import default_chains
+                f, cfg = command[1], self.engine.config
+                cfg.chains = default_chains(perform=bool(f["shaping"]))
+                cfg.cadence_rit = float(f["cadence_rit"]) if f["shaping"] else 0.0
+                cfg.phrase_groove = bool(f["phrase_groove"])
+                cfg.melody = _replace(cfg.melody, plan_apex=bool(f["plan_apex"]))
             elif command[0] == "key":
                 self.engine.request_key(command[1], urgent=command[2])
 

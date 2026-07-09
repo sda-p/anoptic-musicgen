@@ -21,6 +21,16 @@ class ArpConfig:
     velocity_offset: int = -16
 
 
+def make_skips(rng: random.Random, meter: Meter, density: float) -> frozenset[int]:
+    """Per-phrase rest mask (REFINEMENT_PLAN A2): the arp's skip slots drawn once
+    per phrase — like its traversal pattern — so the figuration is a held pattern
+    the ear can track harmony through, not a fresh roll every bar."""
+    step = 1 if density > 0.65 else 2
+    skip_prob = max(0.0, 1.0 - density) * 0.35
+    return frozenset(s for s in range(0, meter.slots, step)
+                     if s != 0 and rng.random() < skip_prob)
+
+
 def generate_arp(
     ctx: HarmonicContext,
     meter: Meter,
@@ -28,6 +38,7 @@ def generate_arp(
     pattern: str,
     cfg: ArpConfig,
     rng: random.Random,
+    skips: frozenset[int] | None = None,
 ) -> tuple[list[NoteEvent], str]:
     lo = (cfg.base_octave + 1) * 12
     hi = lo + cfg.span_octaves * 12
@@ -53,7 +64,8 @@ def generate_arp(
     events: list[NoteEvent] = []
     idx = 0
     for slot in range(0, meter.slots, step):
-        if slot != 0 and rng.random() < skip_prob:
+        skip = (slot in skips) if skips is not None else (slot != 0 and rng.random() < skip_prob)
+        if skip:
             idx += 1  # keep traversal moving through rests
             continue
         pitch = seq[idx % len(seq)]
