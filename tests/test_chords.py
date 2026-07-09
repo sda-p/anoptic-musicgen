@@ -84,7 +84,9 @@ def test_inversion():
     first_inv = Chord(1, inversion=1)
     assert first_inv.bass_pc(C_IONIAN) == 4
     assert first_inv.voiced_pcs(C_IONIAN) == (4, 7, 0)
-    assert first_inv.symbol(C_IONIAN) == "I/1"
+    assert first_inv.symbol(C_IONIAN) == "I6"
+    assert Chord(1, inversion=2).symbol(C_IONIAN) == "I64"
+    assert Chord(5, extensions=("7",), inversion=1).symbol(C_IONIAN) == "V65"
 
 
 def test_function():

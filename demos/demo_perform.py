@@ -25,10 +25,10 @@ from statistics import mean
 from common import emit, standard_args
 
 from musicgen.control.mapping import MappingTable
-from musicgen.gen.conductor import EngineConfig, MusicEngine
+from musicgen.gen.conductor import EngineConfig, FormConfig, MusicEngine
 from musicgen.gen.melody import MelodyConfig
 from musicgen.modifiers import default_chains
-from musicgen.verify import lint_groove, lint_outer
+from musicgen.verify import lint_groove, lint_outer, lint_periods
 
 AFFECT = {"valence": 0.25, "energy": 0.6, "tension": 0.3}  # tension low: authentic cadences
 
@@ -37,7 +37,9 @@ VARIANTS = (
     ("performed", dict(chains=default_chains(perform=True), cadence_rit=0.025)),
     ("full", dict(chains=default_chains(perform=True), cadence_rit=0.025,
                   phrase_groove=True,
-                  melody=MelodyConfig(plan_apex=True, counterpoint=True))),
+                  melody=MelodyConfig(plan_apex=True, counterpoint=True),
+                  form=FormConfig(cadential_64=True, periods=True,
+                                  hypermeter=True, bass_inversions=True))),
 )
 
 
@@ -46,7 +48,7 @@ def main() -> None:
     parser.add_argument("--bars", type=int, default=24)
     args = parser.parse_args()
 
-    print(f"wave A A/B │ seed {args.seed} │ affect {AFFECT}\n")
+    print(f"waves A+B A/B │ seed {args.seed} │ affect {AFFECT}\n")
     baseline_raw = None
     for name, cfg in VARIANTS:
         engine = MusicEngine(seed=args.seed,
@@ -70,13 +72,20 @@ def main() -> None:
         outer = lint_outer(raw, [r.context for r in results])
         extra = ""
         if name == "full":
-            contract = lint_groove(raw, [r.context for r in results],
-                                   {r.bar: r.params for r in results})
+            ctxs = [r.context for r in results]
+            contract = (lint_groove(raw, ctxs, {r.bar: r.params for r in results})
+                        + lint_periods(raw, ctxs))
             apexes = " ".join(f"{p}:{a.pos + 1}@{a.pitch}"
                               for p, a in sorted(engine.state.apexes.items()))
-            extra = (f"\n  {'':<10} groove contract "
+            periods = sum(1 for role in engine.state.planner.periods.values()
+                          if role == "antecedent")
+            cad64 = sum(1 for c in ctxs if c.obligation == "cadential64")
+            inversions = sum(1 for c in ctxs if c.chord and c.chord.inversion == 1)
+            extra = (f"\n  {'':<10} groove+period contracts "
                      f"{'CLEAN' if not contract else f'{len(contract)} VIOLATIONS'}"
-                     f" │ apex plans (phrase:bar@pitch) {apexes}")
+                     f" │ periods {periods} │ cadential 6/4s {cad64}"
+                     f" │ bass inversions {inversions}"
+                     f"\n  {'':<10} apex plans (phrase:bar@pitch) {apexes}")
         print(f"  {name:<10} melody velocity by phrase bar │ {curve} │ rits {rits} "
               f"│ outer-voice violations {len(outer)}{extra}")
         emit(results, engine.config.meter, f"perform_{name}_s{args.seed}", args.out_dir,

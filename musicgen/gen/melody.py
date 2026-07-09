@@ -431,6 +431,7 @@ def generate_melody(
     signature: Motif | None = None,
     apex: ApexPlan | None = None,
     bass: list[NoteEvent] | None = None,
+    replay: tuple[tuple[int, int, int], ...] | None = None,
 ) -> tuple[list[NoteEvent], MelodyState, str]:
     """One bar of melody. `lifecycle` stages the persistent `signature` (M15/M17)
     *positionally* within the phrase — the phrase keeps its own disposable `motif`,
@@ -481,7 +482,41 @@ def generate_melody(
     strong = set(meter.strong_slots())
     faithful = False
 
-    if lifecycle == "completed":
+    # B2 period answer: the consequent opens with the antecedent's realized
+    # bar verbatim (the conductor sends `replay` only when harmony and scale
+    # match). Stand down if the window moved under it or the entry pair would
+    # break the outer-voice frame — the aliased motif then answers in rhythm.
+    replayed = False
+    if replay and lifecycle != "completed":
+        ok = all(lo <= p <= hi for _, _, p in replay)
+        if ok and state.prev_pitch is not None:
+            # the answer enters from the half-cadence target, not from wherever
+            # the antecedent entered: a leap in must be recovered by the replay
+            # itself or the aliased motif answers in rhythm instead
+            entry_iv = replay[0][2] - state.prev_pitch
+            if abs(entry_iv) > 5:
+                back = replay[1][2] - replay[0][2] if len(replay) > 1 else 0
+                ok = back != 0 and (back > 0) != (entry_iv > 0) and abs(back) <= 2
+        if ok and guard is not None:
+            entry = next(((s, p) for s, d, p in replay if s in strong), None)
+            if entry is not None:
+                t = ctx.bar * meter.bar_quarters + entry[0] * GRID
+                bass_now, pair = guard.bass_at(t), guard._pair(t)
+                if bass_now is not None and pair is not None:
+                    prev_m, prev_b = pair
+                    ok = not (forbidden_parallel(prev_b, prev_m, bass_now, entry[1])
+                              or (entry[0] == 0 and forbidden_direct(prev_b, prev_m, bass_now, entry[1])))
+        if ok:
+            placed, anchor = list(replay), replay[0][2]
+            op, shape, replayed = "period answer", "verbatim", True
+            if guard is not None:
+                for slot, _, p in placed:
+                    if slot in strong:
+                        guard.observe(slot, p)
+
+    if replayed:
+        pass
+    elif lifecycle == "completed":
         # Payoff drive (§5.5, M15): the phrase develops the signature itself,
         # constraint-first — bending to the harmony — so the faithful cadential
         # statement lands as the destination, not as the seventh repetition.
@@ -613,7 +648,10 @@ def _cadence_bar(
         bass_now = guard.bass_at(guard.bar_start)
         pair = guard._pair(guard.bar_start)
         if bass_now is not None and pair is not None and bass_now != pair[1]:
-            direction = -1 if bass_now > pair[1] else 1  # contrary to the bass arrival
+            # step contrary to the bass's root arrival — the surface line (the
+            # lint's cadence yardstick) then descends into a rising bass and
+            # vice versa
+            direction = -1 if bass_now > pair[1] else 1
     first = _diatonic_shift(scale, center, direction) if state.prev_pitch is not None else \
         _diatonic_shift(scale, provisional, -direction)
     first = min(max(first, lo), hi)

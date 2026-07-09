@@ -142,6 +142,8 @@ class HarmonicContext:
     phrase_bars: int = 8      # phrase-aware modifiers like Perform read these)
     phrase_apex: int = -1     # bar-in-phrase of the planned melodic apex (-1 = unplanned; A4 —
     #                           Perform's hairpin crests here instead of at a fixed position)
+    form: str = ""            # phrase-form annotation (B2): "" | "antecedent" | "consequent" —
+    #                           verify.lint_periods re-derives the question/answer contract from it
 
 
 @dataclass

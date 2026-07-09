@@ -30,6 +30,7 @@ from musicgen.gen import structure
 from musicgen.gen.arp import ArpConfig, PATTERNS as ARP_PATTERNS, generate_arp, make_skips
 from musicgen.gen.bass import BassConfig, generate_bass
 from musicgen.gen.dramaturg import Dramaturg, DramaturgConfig, Ledger, spend_magnitude
+from musicgen.gen.form import PeriodPlanner
 from musicgen.gen.melody import (
     ApexPlan, MelodyConfig, MelodyState, Motif, generate_melody, make_apex,
     make_motif, make_signature,
@@ -38,7 +39,7 @@ from musicgen.gen.motif import MotifLifecycle
 from musicgen.gen.signatures import MotifDirector, SignatureMotif
 from musicgen.gen.pad import generate_pad
 from musicgen.gen.perc import Groove, PercConfig, generate_perc, make_groove
-from musicgen.ir import LAYER_NAMES, HarmonicContext, Meter, MusicalParams, NoteEvent
+from musicgen.ir import GRID, LAYER_NAMES, HarmonicContext, Meter, MusicalParams, NoteEvent
 from musicgen.modifiers import apply_chain, default_chains
 from musicgen.rng import Seeder
 from musicgen.theory.chords import Chord
@@ -51,6 +52,10 @@ from musicgen.theory.voicing import VoicingConfig
 DEFAULT_CADENCE_CYCLE = ("authentic", "half", "deceptive", "authentic")
 _MIN_MELODY_RANGE = 6  # floor the dramaturg's melody-range contraction stays above (lint-safe)
 _LANDMARK_IMPORTANCE = 0.8  # a signature this important lands as a payoff arrival (§5.5, M17)
+# The lament ground (B4): a 4-bar ostinato whose bass walks the descending
+# tetrachord 1̂–7̂–6̂–5̂ — i, v6, iv6, V (degree, inversion). Phrase-anchored, so
+# every withholding phrase restates the ground; it discharges onto the dominant.
+_LAMENT_CYCLE = ((1, 0), (5, 1), (4, 1), (5, 0))
 
 
 @dataclass(frozen=True)
@@ -75,6 +80,18 @@ class ModulationPlan:
         return (self.pivot_bar, self.dominant_bar, self.arrival_bar)
 
 
+@dataclass(frozen=True)
+class FormConfig:
+    """Wave-B form features (REFINEMENT_PLAN B1–B4), each off = byte-identical.
+    Hot-swappable live like DramaturgConfig (all fields are read per bar)."""
+
+    cadential_64: bool = False    # B1: prepared authentic cadences — I64 -> V -> I
+    periods: bool = False         # B2: antecedent–consequent phrase pairs
+    period_prob: float = 0.65     # chance an eligible phrase pair commits to a period
+    hypermeter: bool = False      # B3: bar weight within the phrase group
+    bass_inversions: bool = False  # B4: stepwise bass lines via first inversions
+
+
 @dataclass
 class EngineConfig:
     meter: Meter = field(default_factory=Meter)
@@ -94,6 +111,7 @@ class EngineConfig:
     #                           beat, a tempo at the next downbeat (0 = off, byte-identical)
     phrase_groove: bool = False  # A2: pin perc/arp pattern draws per phrase — groove identity as
     #                              a contract; fills stay per-bar (off = per-bar rolls, byte-identical)
+    form: FormConfig = field(default_factory=FormConfig)  # wave-B form features (B1–B4)
     mapper: MappingTable | None = None
     chains: dict[str, tuple] = field(default_factory=default_chains)  # {} disables modifiers
     harmony: HarmonyConfig = field(default_factory=HarmonyConfig)
@@ -119,6 +137,9 @@ class ConductorState:
     grooves: dict[int, Groove] = field(default_factory=dict)          # A2: re-derivable per-phrase cache
     arp_skips: dict[int, frozenset[int]] = field(default_factory=dict)  # A2: ditto
     apexes: dict[int, ApexPlan] = field(default_factory=dict)         # A4: ditto
+    planner: PeriodPlanner = field(default_factory=PeriodPlanner)     # B2: period commitments
+    inversion_run: int = 0                                            # B4: consecutive inverted bars
+    lament_bars: set[int] = field(default_factory=set)                # B4: bars the ground owns
     motif_lifecycle: MotifLifecycle | None = None  # persistent signature (M15; None when disabled)
     motif_director: MotifDirector | None = None    # authored-signature selection (M17; None when no library)
     pending_signature: Motif | None = None         # the signature to state this phrase, or None
@@ -252,6 +273,12 @@ class MusicEngine:
             forced = self.state.ledger.phrase_cadence.get(phrase)
             if forced is not None:  # the dramaturg rations/releases the cadence (§5.8)
                 return forced
+        if self.config.form.periods:  # B2: question -> answer (below the dramaturg:
+            role = self.state.planner.role(phrase)  # a withheld consequent rolls forward)
+            if role == "antecedent":
+                return "half"
+            if role == "consequent":
+                return "authentic"
         if self.config.cadence_policies is not None:
             cycle = self.config.cadence_policies
             return cycle[phrase % len(cycle)]
@@ -302,6 +329,34 @@ class MusicEngine:
                 state.prev_chord = chord
                 return bar, chord, why
 
+        # B2: the consequent opens on the antecedent's harmony — the answer
+        # asks the same question before resolving it.
+        if cfg.form.periods and pos.pos == 0 and state.planner.role(pos.phrase) == "consequent":
+            opening = state.planner.opening_chord.get(pos.phrase - 1)
+            if opening is not None:
+                state.prev_chord = opening
+                return bar, opening, "period: consequent opens on the antecedent's harmony"
+
+        # B1: the cadential 6/4 — a prepared authentic cadence. The free bar
+        # before the pre-cadence sounds I over the dominant's bass (I64), the
+        # pre-cadence is pinned to V, the cadence lands I: the arrival reads
+        # as promised, not merely correct.
+        if self._wants_64(pos):
+            chord = Chord(1, inversion=2)
+            state.prev_chord = chord
+            return bar, chord, "cadential 6/4: I64 -> V -> I"
+
+        # B4: the lament ground — while the dramaturg withholds on an odd
+        # buildup, the walk is replaced by the descending-tetrachord ostinato.
+        if (self._dramaturg_on and state.ledger.lament
+                and pos.slot in ("open", "free") and bar > 0):
+            degree, inversion = _LAMENT_CYCLE[pos.pos % 4]
+            chord = Chord(degree, inversion=inversion)
+            state.prev_chord = chord
+            state.lament_bars.add(bar)
+            bass_deg = (1, 7, 6, 5)[pos.pos % 4]
+            return bar, chord, f"lament ground: bass ^{bass_deg} (cycle {pos.pos % 4 + 1}/4)"
+
         held = (
             self._harmonic_rhythm() == 0.5
             and pos.slot == "free"
@@ -310,8 +365,9 @@ class MusicEngine:
         )
         if held:
             return bar, self.state.prev_chord, "held (slow harmonic rhythm)"
+        prev = self.state.prev_chord
         chord, why = next_chord(
-            prev=self.state.prev_chord,
+            prev=prev,
             slot=pos.slot,
             cadence_policy=self._policy(pos.phrase),
             tension=structure.effective_tension(self.affect.tension, pos),
@@ -323,9 +379,66 @@ class MusicEngine:
             rng=self.seeder.stream("harmony", bar),
             suppress_tonic=self._dramaturg_on and self.state.ledger.suppress_tonic,
             tonicize=self._tonicize_target(pos),
+            # a cadential 6/4 (B1) or a lament ground (B4) must discharge onto
+            # the dominant, never the vii° roll
+            force_dominant=(prev is not None and prev.degree == 1 and prev.inversion == 2)
+                           or (self._dramaturg_on and self.state.ledger.lament),
         )
+        chord, why = self._plan_inversion(chord, pos, bar, why)
         self.state.prev_chord = chord
         return bar, chord, why
+
+    def _plan_inversion(self, chord: Chord, pos: structure.PhrasePos, bar: int,
+                        why: str) -> tuple[Chord, str]:
+        """B4 greedy stepwise-bass bias: at free bars, prefer the (root/first)
+        inversion whose bass pc steps from the previous chord's bass pc —
+        turning the bass from a root-reporter into a voice. Root position stays
+        the default; never at phrase anchors, cadences, modulations, applied
+        dominants, sus voicings, or three bars running."""
+        cfg, state = self.config, self.state
+        eligible = (cfg.form.bass_inversions and pos.slot == "free" and bar > 0
+                    and not chord.applied and chord.inversion == 0
+                    and not any(e.startswith("sus") for e in chord.extensions)
+                    and state.modulation is None and state.prev_chord is not None)
+        if not eligible:
+            state.inversion_run = state.inversion_run + 1 if chord.inversion else 0
+            return chord, why
+        scale = Scale(self._tonic_for_bar(bar), state.current_mode)
+        prev_pc = state.prev_chord.bass_pc(scale)
+
+        def score(inv: int) -> float:
+            pc = replace(chord, inversion=inv).bass_pc(scale)
+            d = min((pc - prev_pc) % 12, (prev_pc - pc) % 12)
+            s = {0: 1.2, 1: 0.0, 2: 0.0}.get(d, 2.0)  # steps beat statics beat leaps
+            if inv:
+                s += 0.8  # root position is the resting default
+                if state.inversion_run >= 2:
+                    s += 5.0  # never three inverted bars running
+            return s
+
+        best = min((0, 1), key=score)
+        if best:
+            chord = replace(chord, inversion=best)
+            why += f" | bass 6 (bass pc {prev_pc} -> {chord.bass_pc(scale)})"
+        state.inversion_run = state.inversion_run + 1 if best else 0
+        return chord, why
+
+    def _wants_64(self, pos: structure.PhrasePos) -> bool:
+        """Deploy the cadential 6/4 (B1) at the bars-3 free slot of a phrase
+        headed for an authentic cadence — always on a dramaturg spend or a
+        period's consequent (the promised arrivals), otherwise when tension is
+        high enough that a prepared cadence earns its weight."""
+        cfg = self.config
+        if (not cfg.form.cadential_64 or pos.bars < 4 or pos.pos != pos.bars - 3
+                or self.state.modulation is not None):
+            return False
+        if self._policy(pos.phrase) != "authentic":
+            return False
+        if self._dramaturg_on and self.state.ledger.phrase_cadence.get(pos.phrase) == "authentic":
+            return True
+        if cfg.form.periods and self.state.planner.role(pos.phrase) == "consequent":
+            return True
+        return self.affect.tension >= 0.25
 
     def _tonicize_target(self, pos: structure.PhrasePos) -> int:
         """Secondary-dominant deployment (§5.8, M14): at a sustained withholding
@@ -335,6 +448,8 @@ class MusicEngine:
         if not (self._dramaturg_on and self.dramaturg.cfg.earned_dissonance and pos.slot == "pre-cadence"):
             return 0
         ledger = self.state.ledger
+        if ledger.lament:  # the ground owns this buildup's story; it discharges onto V (B4)
+            return 0
         if ledger.phrase_cadence.get(pos.phrase) != "deceptive":
             return 0
         rung = ledger.withholding_phrases // max(1, self.dramaturg.cfg.escalate_phrases)
@@ -507,6 +622,23 @@ class MusicEngine:
                 and pos.phrase - state.last_key_phrase >= cfg.wander_phrases):
             state.pending_key = (self._wander_target(pos.phrase), False)
 
+        # Period commitment (B2): at an even phrase boundary, when nothing else
+        # owns the cadences (no key change in flight, dramaturg idle), draw a
+        # question–answer pair. Decided before the mapper samples this phrase's
+        # policy, so the antecedent's half cadence is in force from bar one.
+        period_note = ""
+        if cfg.form.periods and pos.pos == 0:
+            if (pos.phrase % 2 == 0 and pos.phrase not in state.planner.periods
+                    and state.modulation is None and state.pending_key is None
+                    and not (self._dramaturg_on and pos.phrase in state.ledger.phrase_cadence)):
+                if self.seeder.stream("period", pos.phrase).random() < cfg.form.period_prob:
+                    state.planner.commit(pos.phrase)
+                    period_note = (f"period: phrases {pos.phrase}+{pos.phrase + 1} committed "
+                                   f"(antecedent half -> consequent authentic)")
+            elif (state.planner.role(pos.phrase) == "consequent" and self._dramaturg_on
+                    and state.ledger.phrase_cadence.get(pos.phrase) == "deceptive"):
+                period_note = "period: consequent withheld by the dramaturg (rolls forward)"
+
         # Instrument swaps are phrase-quantized like mode (urgent demotes to
         # the barline) but ignore the modulation window — timbre is harmless
         # to the pivot analysis. Read _urgent before the mode block clears it.
@@ -559,6 +691,13 @@ class MusicEngine:
                     lyr for lyr in params.layers if lyr not in directive.lock_layers))
             if directive.intensify:
                 params = self._escalate(params, directive.intensify)
+
+        # Hypermetric weight (B3): bars within the group get the accent
+        # treatment slots already have — a small bar-level dynamic contour.
+        if cfg.form.hypermeter:
+            hyper = structure.hyper_weight(pos.pos, pos.bars)
+            params = replace(params, velocity_center=max(1, min(127,
+                params.velocity_center + round(6 * (hyper - 0.7)))))
 
         # Motif lifecycle (§5.5, M15): a persistent signature advances at each
         # phrase boundary; the faithful statement is gated on a spend, fusing with
@@ -620,10 +759,16 @@ class MusicEngine:
             cadence_slot=slot,
             cadence_policy=self._policy(pos.phrase) if slot else "",
             modulation=mod_note,
-            obligation=f"tonicize:{chord.applied}" if chord.applied else "",
+            # a lament bar is only CLAIMED while the ground is still in force —
+            # the spend clears the flag, and the one lookahead bar it already
+            # committed (cycle pos 0 = the tonic) simply plays untagged
+            obligation=("cadential64" if chord.degree == 1 and chord.inversion == 2
+                        else "lament" if bar in state.lament_bars and state.ledger.lament
+                        else f"tonicize:{chord.applied}" if chord.applied else ""),
             phrase_pos=pos.pos,
             phrase_bars=pos.bars,
             phrase_apex=apex.pos if apex is not None else -1,
+            form=state.planner.role(pos.phrase),
         )
 
         events: list[NoteEvent] = []
@@ -634,6 +779,8 @@ class MusicEngine:
             trace.append(f"perform: cadence rit -{rit * 100:.1f}% (a tempo next bar)")
         if apex_note:
             trace.append(apex_note)
+        if period_note:
+            trace.append(period_note)
         if instr_note:
             trace.append(instr_note)
 
@@ -716,14 +863,27 @@ class MusicEngine:
                 signature, mel_lifecycle = state.motif_lifecycle.motif, lifecycle_state
             else:
                 signature, mel_lifecycle = None, ""
+            # B2: hand the consequent its verbatim answer when the harmony and
+            # scale still match the recorded antecedent opening.
+            replay = None
+            if cfg.form.periods and pos.pos == 0 and state.planner.role(pos.phrase) == "consequent":
+                ante = pos.phrase - 1
+                if (state.planner.opening_chord.get(ante) == chord
+                        and state.planner.opening_scale.get(ante) == self.scale):
+                    replay = state.planner.opening_melody.get(ante)
             mel_events, mel_state, mel_trace = generate_melody(
                 ctx, cfg.meter, params, pos, self._motif(pos.phrase, params),
                 state.melody, mel_cfg, self.seeder.stream("melody", bar),
                 lifecycle=mel_lifecycle, signature=signature, apex=apex,
-                bass=bass_events,
+                bass=bass_events, replay=replay,
             )
             events.extend(mel_events)
             state.melody = mel_state
+            if cfg.form.periods and pos.pos == 0 and state.planner.role(pos.phrase) == "antecedent":
+                state.planner.opening_chord[pos.phrase] = chord
+                state.planner.opening_scale[pos.phrase] = self.scale
+                state.planner.opening_melody[pos.phrase] = tuple(
+                    (cfg.meter.slot_of(e.start), round(e.dur / GRID), e.pitch) for e in mel_events)
             tag = " │ signature" if sig_motif is not None else (f" │ motif {lifecycle_state}" if lifecycle_state else "")
             trace.append(mel_trace + tag)
         if "arp" in layers:
@@ -755,6 +915,7 @@ class MusicEngine:
             perc_events, fill, perc_trace = generate_perc(
                 ctx, cfg.meter, params, pos, state.last_fill,
                 cfg.perc, self.seeder.stream("perc", bar), groove=groove,
+                hyper_fill=0.35 if cfg.form.hypermeter else 0.0,
             )
             events.extend(perc_events)
             state.last_fill = fill
@@ -789,6 +950,8 @@ class MusicEngine:
         # (M15) and authored signatures (M17) are woven into these phrases as
         # events, never substituted for them: substituting the one frozen
         # signature for every phrase was the M15 monoculture.
+        if self.config.form.periods and self.state.planner.role(phrase) == "consequent":
+            phrase -= 1  # B2: the answer develops the question's material
         if phrase not in self.state.motifs:
             self.state.motifs[phrase] = make_motif(
                 self.seeder.stream("motif", phrase),

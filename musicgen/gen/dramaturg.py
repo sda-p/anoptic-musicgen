@@ -66,6 +66,8 @@ class DramaturgConfig:
     max_debt: int = 96          # clamp so a runaway trajectory can't unbound the ledger
     earned_dissonance: bool = True  # M14: deploy obligation-bearing dissonance (suspensions …); False => M13-identical
     motif_lifecycle: bool = True    # M15: a persistent signature motif; its completed statement lands on a spend
+    lament_bass: bool = True        # B4: alternate buildups ride a descending-tetrachord ground
+    #                                 (1̂–7̂–6̂–5̂ via inversions) instead of the dominant pedal
 
 
 @dataclass
@@ -80,6 +82,8 @@ class Ledger:
     prev_base_tension: float | None = None
     phrase_cadence: dict[int, str] = field(default_factory=dict)  # dramaturg's per-phrase choice
     suppress_tonic: bool = False    # per-bar: walk should circle the tonic (read at chord-gen time)
+    lament: bool = False            # per-bar (B4): the walk rides the lament ground instead
+    buildups: int = 0               # completed withhold->spend cycles (alternates the buildup flavor)
     last_spend: float = 0.0         # magnitude of the most recent payoff (trace / demo readout)
     last_note: str = ""             # most recent trace line
 
@@ -100,6 +104,7 @@ class Directive:
     suspend: bool = False               # applied (M14): request a prepared pad suspension this bar
     appoggiatura: bool = False          # applied (M14): allow an unprepared pad lean (payoff cadence)
     pedal: int = 0                      # applied (M14): scale degree the bass pedals (0 none; 5 dominant)
+    lament: bool = False                # applied (B4): the harmony rides the descending-tetrachord ground
     note: str = ""
 
 
@@ -150,8 +155,11 @@ class Dramaturg:
                 ledger.withholding_phrases = 0  # neutral zone: hand the cadence back to the mapper
                 ledger.last_note = f"dramaturg: idle (tension {base_tension:.2f})"
                 directive = Directive(note=ledger.last_note)
-        # persist the tonic-suppression signal for the walk, which runs a bar ahead
+        # persist the tonic-suppression / lament signals for the walk, which
+        # runs a bar ahead (the queue skew is inherent and tolerated, as with
+        # suppress_tonic since M13)
         ledger.suppress_tonic = directive.withhold_root_tonic
+        ledger.lament = directive.lament
         # M14 earned dissonance: ornament a cadence the dramaturg controls with a
         # prepared suspension. While withholding it resolves *into a deceptive
         # cadence* (local relief, the debt stands); on the spend it resolves *into
@@ -179,6 +187,17 @@ class Dramaturg:
         intensify = min(rung / self.cfg.escalation_cap, 1.0)
         return cap, (self.cfg.hold_tier,), intensify, rung
 
+    def _ground(self, ledger: Ledger, rung: int) -> tuple[int, bool]:
+        """The buildup's structural anchor (B4): odd buildups ride the lament
+        tetrachord ground (1̂–7̂–6̂–5̂ via inversions, the walk replaced by an
+        ostinato); even ones keep the M14 dominant pedal. Returns (pedal degree,
+        lament flag) — mutually exclusive, both off below rung 1."""
+        if rung < 1 or not self.cfg.earned_dissonance:
+            return 0, False
+        if self.cfg.lament_bass and ledger.buildups % 2 == 1:
+            return 0, True
+        return _DOMINANT_PEDAL, False
+
     def _accrue(self, ledger: Ledger, pos: PhrasePos) -> Directive:
         ledger.withholding_phrases += 1
         ledger.bars_since_authentic = min(ledger.bars_since_authentic + pos.bars, self.cfg.max_debt)
@@ -186,14 +205,15 @@ class Dramaturg:
         ledger.peak_tension = max(ledger.peak_tension, ledger.prev_base_tension or 0.0)
         ledger.phrase_cadence[pos.phrase] = "deceptive"  # ration: refuse the tonic
         cap, lock, intensify, rung = self._withholding(ledger)
-        pedal = _DOMINANT_PEDAL if rung >= 1 and self.cfg.earned_dissonance else 0  # dominant pedal anchors the hold
-        extra = (f" [hold {'+'.join(lock)}{', dom pedal' if pedal else ''}, melody -{cap}st, "
+        pedal, lament = self._ground(ledger, rung)
+        anchor = ", dom pedal" if pedal else ", lament ground" if lament else ""
+        extra = (f" [hold {'+'.join(lock)}{anchor}, melody -{cap}st, "
                  f"push +{round(intensify * 100)}%]" if rung >= 1 else "")
         ledger.last_note = (f"dramaturg: WITHHOLD phrase {pos.phrase} -> deceptive, circle tonic "
                             f"(debt {self._debt(ledger)}, rung {rung}){extra}")
         return Directive(cadence="deceptive", withhold_root_tonic=True, escalation=rung,
                          register_cap=cap, lock_layers=lock, intensify=intensify, pedal=pedal,
-                         note=ledger.last_note)
+                         lament=lament, note=ledger.last_note)
 
     def _spend(self, ledger: Ledger, pos: PhrasePos) -> Directive:
         magnitude = spend_magnitude(ledger, self.cfg)
@@ -208,6 +228,7 @@ class Dramaturg:
         ledger.deceptions = 0
         ledger.withholding_phrases = 0
         ledger.peak_tension = 0.0
+        ledger.buildups += 1  # the next buildup alternates its ground (B4)
         return Directive(cadence="authentic", payoff=magnitude, brighten=brighten, note=note)
 
     def _standing(self, ledger: Ledger) -> Directive:
@@ -216,6 +237,7 @@ class Dramaturg:
         if ledger.withholding_phrases <= 0:
             return Directive()
         cap, lock, intensify, rung = self._withholding(ledger)
-        pedal = _DOMINANT_PEDAL if rung >= 1 and self.cfg.earned_dissonance else 0
+        pedal, lament = self._ground(ledger, rung)
         return Directive(withhold_root_tonic=True, escalation=rung,
-                         register_cap=cap, lock_layers=lock, intensify=intensify, pedal=pedal)
+                         register_cap=cap, lock_layers=lock, intensify=intensify,
+                         pedal=pedal, lament=lament)

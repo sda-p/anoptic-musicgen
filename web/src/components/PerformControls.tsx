@@ -17,6 +17,10 @@ export function PerformControls() {
   const groove = Boolean(s.perform.phrase_groove);
   const apex = Boolean(s.perform.plan_apex);
   const counterpoint = Boolean(s.perform.counterpoint);
+  const cad64 = Boolean(s.perform.cadential_64);
+  const periods = Boolean(s.perform.periods);
+  const hyper = Boolean(s.perform.hypermeter);
+  const bassInv = Boolean(s.perform.bass_inversions);
   return (
     <div className="dramaturg-ctl">
       <div className="dramaturg-head">
@@ -61,6 +65,46 @@ export function PerformControls() {
         {counterpoint
           ? "outer-voice counterpoint on · no parallel 5ths/8ves, contrary cadences"
           : "outer-voice counterpoint off · the melody-bass frame is unguarded"}
+      </label>
+      <label className={`toggle toggle-sub ${periods ? "on" : ""}`}>
+        <input
+          type="checkbox"
+          checked={periods}
+          onChange={(e) => api.setPerform({ periods: e.target.checked })}
+        />
+        {periods
+          ? "periods on · question phrases answered — half cadence, then the same opening resolved"
+          : "periods off · phrases chain without pairing"}
+      </label>
+      <label className={`toggle toggle-sub ${cad64 ? "on" : ""}`}>
+        <input
+          type="checkbox"
+          checked={cad64}
+          onChange={(e) => api.setPerform({ cadential_64: e.target.checked })}
+        />
+        {cad64
+          ? "cadential 6/4 on · authentic cadences arrive prepared (I64 → V → I)"
+          : "cadential 6/4 off · cadences correct but unprepared"}
+      </label>
+      <label className={`toggle toggle-sub ${hyper ? "on" : ""}`}>
+        <input
+          type="checkbox"
+          checked={hyper}
+          onChange={(e) => api.setPerform({ hypermeter: e.target.checked })}
+        />
+        {hyper
+          ? "hypermeter on · bars weighted within the group, mid-phrase fills"
+          : "hypermeter off · all bars weigh the same"}
+      </label>
+      <label className={`toggle toggle-sub ${bassInv ? "on" : ""}`}>
+        <input
+          type="checkbox"
+          checked={bassInv}
+          onChange={(e) => api.setPerform({ bass_inversions: e.target.checked })}
+        />
+        {bassInv
+          ? "bass planning on · stepwise bass via inversions, lament grounds on odd buildups"
+          : "bass planning off · the bass reports roots"}
       </label>
       {shaping && s.performUi.length > 0 && (
         <ConstantsGrid

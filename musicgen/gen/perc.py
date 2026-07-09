@@ -91,11 +91,14 @@ def generate_perc(
     cfg: PercConfig,
     rng: random.Random,
     groove: Groove | None = None,
+    hyper_fill: float = 0.0,
 ) -> tuple[list[NoteEvent], bool, str]:
     """One bar of drums. Returns (events, fill_played, trace). With a `groove`
     the stochastic pattern draws (ghosts, hat drops, open hat) come pinned from
     the phrase (A2) and the per-bar stream rolls only the fill; without one,
-    behavior is byte-identical to the per-bar rolls."""
+    behavior is byte-identical to the per-bar rolls. `hyper_fill` (B3) scales a
+    secondary fill chance into the hyper-strong mid-phrase downbeat, which then
+    earns its crash like a phrase boundary does."""
     slots = meter.slots
     density, roughness = params.note_density, params.roughness
     vel_of = dict(cfg.base_velocities)
@@ -146,8 +149,11 @@ def generate_perc(
 
     fill = False
     trace_bits = [kick_trace]
-    if pos.slot == "cadence":
+    fill_bar = pos.slot == "cadence" or (hyper_fill > 0 and pos.pos == pos.bars // 2 - 1)
+    if fill_bar:
         fill_prob = cfg.fill_base_prob + ctx.tension * cfg.fill_tension_weight
+        if pos.slot != "cadence":
+            fill_prob *= hyper_fill  # mid-phrase fills are the rarer punctuation
         fill = rng.random() < fill_prob
         if fill:
             pattern = tuple(slots + o for o in FILL_PATTERNS[rng.randrange(len(FILL_PATTERNS))])
@@ -157,7 +163,7 @@ def generate_perc(
                 hits.append((s, voice, 84 + i * 7))
             trace_bits.append(f"fill {pattern}")
 
-    if had_fill and pos.pos == 0:
+    if had_fill and (pos.pos == 0 or (hyper_fill > 0 and pos.pos == pos.bars // 2)):
         hits.append((0, "crash", vel_of["crash"]))
         trace_bits.append("crash")
 

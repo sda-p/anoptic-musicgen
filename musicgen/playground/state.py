@@ -16,19 +16,23 @@ from pathlib import Path
 from musicgen.control.automation import affect_at
 from musicgen.control.levers import validate_override
 from musicgen.control.mapping import MappingTable
-from musicgen.gen.conductor import EngineConfig, MusicEngine
+from musicgen.gen.conductor import EngineConfig, FormConfig, MusicEngine
 from musicgen.gen.dramaturg import DramaturgConfig
 from musicgen.gen.melody import MelodyConfig
 from musicgen.modifiers import default_chains
 from musicgen.playground.telemetry import to_jsonable
 
-# the performed/craft-surface mirror (REFINEMENT_PLAN waves A: A1 shaping+rit,
-# A2 groove, A3 counterpoint, A4 apex): all off by default = byte-identical
-# output; the panel toggles them live. cadence_rit is the depth the rit knob
-# applies WHEN shaping is on (shaping off forces it to 0).
+# the refinement mirror (REFINEMENT_PLAN waves A+B: A1 shaping+rit, A2 groove,
+# A3 counterpoint, A4 apex; B1 cadential 6/4, B2 periods, B3 hypermeter,
+# B4 bass inversions + lament): all off by default = byte-identical output;
+# the panel toggles them live. cadence_rit is the depth the rit knob applies
+# WHEN shaping is on (shaping off forces it to 0).
 _PERFORM_DEFAULTS = {"shaping": False, "cadence_rit": 0.025,
                      "phrase_groove": False, "plan_apex": False,
-                     "counterpoint": False}
+                     "counterpoint": False, "cadential_64": False,
+                     "periods": False, "hypermeter": False,
+                     "bass_inversions": False}
+_PERFORM_FLOATS = {"cadence_rit"}
 
 # a tighter look-ahead than the demos: generation is µs-fast, so a small buffer
 # keeps live lever moves audible within a beat instead of the default 2.5 s
@@ -107,7 +111,11 @@ class PlaygroundState:
                            cadence_rit=float(p["cadence_rit"]) if p["shaping"] else 0.0,
                            phrase_groove=bool(p["phrase_groove"]),
                            melody=MelodyConfig(plan_apex=bool(p["plan_apex"]),
-                                               counterpoint=bool(p["counterpoint"])))
+                                               counterpoint=bool(p["counterpoint"])),
+                           form=FormConfig(cadential_64=bool(p["cadential_64"]),
+                                           periods=bool(p["periods"]),
+                                           hypermeter=bool(p["hypermeter"]),
+                                           bass_inversions=bool(p["bass_inversions"])))
         engine = MusicEngine(seed=self.seed, config=cfg)
         for name, value in self.pinned.items():
             engine.set_override(name, value)
@@ -262,7 +270,7 @@ class PlaygroundState:
         shaping + cadence rit, A2 phrase groove, A4 apex planning) — applied at
         the next bar edge on the generation thread, like the dramaturg; no
         rebuild. Off across the board is byte-identical."""
-        applied = {k: (float(v) if k == "cadence_rit" else bool(v))
+        applied = {k: (float(v) if k in _PERFORM_FLOATS else bool(v))
                    for k, v in updates.items() if k in self._perform}
         if not applied:
             return
@@ -379,7 +387,7 @@ class PlaygroundState:
                                 data["automation"].get("loop_bars"),
                                 data["automation"].get("points"))
         if "perform" in data:
-            self._perform.update({k: (float(v) if k == "cadence_rit" else bool(v))
+            self._perform.update({k: (float(v) if k in _PERFORM_FLOATS else bool(v))
                                   for k, v in data["perform"].items() if k in self._perform})
         self._restart()  # rebuild a running player with the imported config
 

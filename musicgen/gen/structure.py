@@ -38,3 +38,19 @@ def effective_tension(base: float, pos: PhrasePos) -> float:
     arc = ARCS.get(pos.bars)
     factor = arc[pos.pos] if arc else 1.0
     return max(0.0, min(1.0, base * factor))
+
+
+HYPER_PROFILE = (1.0, 0.4, 0.7, 0.4)  # bar weights within the 4-bar group (B3)
+
+
+def hyper_weight(pos: int, bars: int) -> float:
+    """Hypermetric weight of a bar within its phrase (REFINEMENT_PLAN B3):
+    bars group in fours the way beats group in bars — bar 1 strong, bar 3
+    secondary. In phrases of 8+ the mid-phrase downbeat is the second-
+    strongest (which is why the M15 signature slot at bars//2 already felt
+    right). Consumers: bar-level dynamics, the mid-phrase fill/crash, and the
+    slow-harmonic-rhythm hold placement."""
+    weight = HYPER_PROFILE[pos % 4]
+    if bars >= 8 and pos == bars // 2:
+        weight = 0.85
+    return weight

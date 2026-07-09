@@ -43,10 +43,10 @@ these waves start from a clean baseline.
 | A2 | Groove persistence contract ✚ *(done)* | S | ★★★ | — | no |
 | A3 | Outer-voice counterpoint (lint + guards) ✚ *(done)* | S–M | ★★★★ | — | rules → spec |
 | A4 | Single-apex contour planning ✚ *(done)* | S | ★★★ | — | no |
-| B1 | Cadential 6/4 (prepared authentic cadence) | S | ★★★★ | — | no |
-| B2 | Antecedent–consequent periods | M | ★★★★★ | — | planner → spec |
-| B3 | Hypermetric weight | S | ★★★ | — | no |
-| B4 | Bass-line planning (inversions, lament bass) | M | ★★★★ | B1, A3 | no |
+| B1 | Cadential 6/4 (prepared authentic cadence) ✚ *(done)* | S | ★★★★ | — | no |
+| B2 | Antecedent–consequent periods ✚ *(done)* | M | ★★★★★ | — | planner → spec |
+| B3 | Hypermetric weight ✚ *(done)* | S | ★★★ | — | no |
+| B4 | Bass-line planning (inversions, lament bass) ✚ *(done)* | M | ★★★★ | B1, A3 | no |
 | C1 | Parallel doubling in 3rds/6ths | S | ★★★ | A3 | no |
 | C2 | Inner-voice animation (pad figuration) | S–M | ★★★★ | — | no |
 | C3 | Imitation | M | ★★★★ | A3 | no |
@@ -188,7 +188,7 @@ sweeps are clean.
 
 ## Wave B — coherence: periods, prepared cadences, hypermeter, the bass as a voice
 
-### B1. Cadential 6/4
+### B1. Cadential 6/4 ✚ *(done; PLANS.md M21)*
 
 **Payoff ★★★★ / Complexity S.** The single missing cadence idiom that makes
 authentic cadences read as *prepared*. Fully representable today —
@@ -211,7 +211,7 @@ already respect inversions.
 **Files.** `theory/harmony.py`, `theory/chords.py` (symbol), `gen/conductor.py`,
 `verify.py`.
 
-### B2. Antecedent–consequent periods
+### B2. Antecedent–consequent periods ✚ *(done; PLANS.md M21)*
 
 **Payoff ★★★★★ / Complexity M.** Improvements.md is right that this is the
 strongest "a mind composed this" signal available, and the machinery is 70%
@@ -249,7 +249,7 @@ the commitment and any override that broke it.
 **Demo.** `demo_periods.py`: static mid levers, planner on/off A/B — the QA
 call-and-answer should be blind-obvious.
 
-### B3. Hypermetric weight
+### B3. Hypermetric weight ✚ *(done; PLANS.md M21)*
 
 **Payoff ★★★ / Complexity S.** Bars within the group get the weight treatment
 slots already have.
@@ -269,7 +269,7 @@ slots already have.
 **Lint.** None new — existing sweeps must stay clean; A/B dump shows the roughness
 modulation.
 
-### B4. Bass-line planning: inversions and the lament tetrachord
+### B4. Bass-line planning: inversions and the lament tetrachord ✚ *(done; PLANS.md M22)*
 
 **Payoff ★★★★ / Complexity M.** Turns the bass from a root-reporter into a voice.
 Prereqs: B1 (inversion plumbing proven at the cadence), A3 (parallels shift when

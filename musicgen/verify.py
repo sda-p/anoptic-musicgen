@@ -311,6 +311,35 @@ def _lint_obligations(events, ctx_by_bar, meter, out) -> None:
             if nxt is None or nxt.chord is None or nxt.chord.degree != target:
                 out.append(Violation("tonicize", bar,
                     f"secondary dominant {ctx.chord_sym or '(?)'} does not resolve to degree {target}"))
+        elif ctx.obligation == "cadential64":
+            # B1: the 6/4 is a promise — a root-position dominant must follow
+            nxt = ctx_by_bar.get(bar + 1)
+            if (nxt is None or nxt.chord is None
+                    or nxt.chord.degree != 5 or nxt.chord.inversion != 0):
+                out.append(Violation("cadential64", bar,
+                    f"cadential 6/4 {ctx.chord_sym or '(?)'} does not discharge onto "
+                    f"a root-position V"))
+
+    # B4: a lament ground (contiguous obligation "lament" bars) must reach the
+    # dominant — its own last chord is degree 5, or the bar after it is.
+    lament = sorted(b for b, c in ctx_by_bar.items() if c.obligation == "lament")
+    i = 0
+    while i < len(lament):
+        j = i
+        while j + 1 < len(lament) and lament[j + 1] == lament[j] + 1:
+            j += 1
+        last = ctx_by_bar[lament[j]]
+        nxt = ctx_by_bar.get(lament[j] + 1)
+
+        def _is_dominant(c) -> bool:  # the bass must ARRIVE on 5̂: root position only
+            return c is not None and c.chord is not None and c.chord.degree == 5 \
+                and c.chord.inversion == 0
+
+        reaches = _is_dominant(last) or _is_dominant(nxt)
+        if not reaches:
+            out.append(Violation("lament", lament[i],
+                f"lament ground (bars {lament[i] + 1}..{lament[j] + 1}) never reaches the dominant"))
+        i = j + 1
 
 
 def lint_groove(
@@ -417,17 +446,63 @@ def lint_outer(
     for ctx in contexts:
         if ctx.cadence_slot != "cadence":
             continue
+        # the cadence approach mixes yardsticks deliberately: the melody is the
+        # SURFACE line (the ear tracks it — e.g. the post-apex descent), while
+        # the bass is the ROOT motion downbeat-to-downbeat — its approach tone
+        # is an ornamental connective whose direction says nothing about the
+        # harmonic arrival (2̂→1̂ over 5̂→1̂ is contrary regardless of which side
+        # the approach slid in from)
         bar_start = ctx.bar * meter.bar_quarters
-        before = [p for p in pairs if bar_start - meter.bar_quarters - 1e-9 < p[0] < bar_start - 1e-9]
-        after = [p for p in pairs if p[3] == ctx.bar]
-        if before and after:
+        before = [e for e in melody if bar_start - meter.bar_quarters - 1e-9 < e.start < bar_start - 1e-9]
+        after = [e for e in melody if meter.bar_of(e.start) == ctx.bar]
+        b1 = bass_at(bar_start - meter.bar_quarters)
+        b2 = bass_at(bar_start)
+        if before and after and b1 is not None and b2 is not None:
             total += 1
-            (_, m1, b1, _, _), (_, m2, b2, _, _) = before[-1], after[0]
-            good += motion(b1, m1, b2, m2) in ("contrary", "oblique")
+            good += motion(b1.pitch, before[-1].pitch, b2.pitch, after[0].pitch) in ("contrary", "oblique")
     if total >= 4 and good / total < contrary_min:
         out.append(Violation("outer-cadence", -1,
             f"only {good}/{total} cadences approached in contrary/oblique motion "
             f"({good / total:.2f} < {contrary_min})"))
+    return out
+
+
+def lint_periods(
+    events: Sequence[NoteEvent],
+    contexts: Sequence[HarmonicContext],
+    meter: Meter = Meter(),
+) -> list[Violation]:
+    """B2 period contract (REFINEMENT_PLAN): a committed antecedent–consequent
+    pair must answer — the consequent's opening bar carries the antecedent's
+    melodic rhythm (its onset slots; pitches may re-realize when the guard or a
+    moved window demands it). Cadence conformance per phrase is already the
+    generic cadence rule's business, since ctx carries the forced policy.
+    Standalone like lint_groove/lint_outer; run on pre-modifier IR."""
+    ctx_by_bar = {c.bar: c for c in contexts}
+    onsets: dict[int, list[int]] = {}
+    payoff_bars: set[int] = set()
+    for ev in events:
+        if ev.layer == "melody":
+            onsets.setdefault(meter.bar_of(ev.start), []).append(meter.slot_of(ev.start))
+            if ev.role == MOTIF_ROLE:  # a completed-signature statement (M15/M17)
+                payoff_bars.add(meter.bar_of(ev.start))
+
+    out: list[Violation] = []
+    for bar, ctx in sorted(ctx_by_bar.items()):
+        if ctx.form != "consequent" or ctx.phrase_pos != 0:
+            continue
+        ante_bar = bar - ctx.phrase_bars
+        if ctx_by_bar.get(ante_bar) is None or ctx_by_bar[ante_bar].form != "antecedent":
+            out.append(Violation("period", bar, "consequent without a recorded antecedent"))
+            continue
+        if any(b in payoff_bars for b in range(bar, bar + ctx.phrase_bars)):
+            continue  # a dramaturg/landmark payoff overrode the answer — the arrival wins
+        question = sorted(onsets.get(ante_bar, []))
+        answer = sorted(onsets.get(bar, []))
+        if question and answer and question != answer:
+            out.append(Violation("period", bar,
+                f"consequent opening rhythm {answer} does not answer the "
+                f"antecedent's {question} (bar {ante_bar + 1})"))
     return out
 
 

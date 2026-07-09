@@ -124,9 +124,16 @@ class Chord:
             numeral = numeral.lower()
         body = prefix + numeral + ("°" if quality == "dim" else "")
         ext = set(self.extensions)
+        # conventional figures: triads 6 / 64; seventh chords 65 / 43 / 42
+        # (the figure implies the 7th, so the plain "7" suffix is dropped)
+        figure = ""
+        if self.inversion:
+            figures = ({1: "6", 2: "64"} if len(self.member_degrees()) == 3
+                       else {1: "65", 2: "43", 3: "42"})
+            figure = figures.get(self.inversion, f"/{self.inversion}")
         if {"7", "9"} <= ext:
             body += "9"
-        elif "7" in ext:
+        elif "7" in ext and not figure:
             body += "7"
         elif "9" in ext:
             body += "(add9)"
@@ -134,6 +141,4 @@ class Chord:
             body += "sus2"
         if "sus4" in ext:
             body += "sus4"
-        if self.inversion:
-            body += f"/{self.inversion}"
-        return body
+        return body + figure
