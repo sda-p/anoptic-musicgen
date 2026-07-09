@@ -40,6 +40,13 @@ GM_PATCHES = {
     ("melody", "soft"): 11, ("melody", "hard"): 81,  # Vibraphone / Lead 2 (sawtooth)
     ("melody", "keys"): 8,                           # Celesta — sampled-bell analog
     ("arp", "pluck"): 46, ("arp", "glass"): 98,      # Orchestral Harp / FX 3 (crystal)
+    # environmental / texture voices (DX-1413a): the synth backend is the real
+    # thing (patches.py); these are the nearest GM analogs so the MIDI export
+    # path still resolves a program (GM has no wind-chime or electrical-hum voice)
+    ("arp", "chimes"): 112,                          # Tinkle Bell ~ wind chimes
+    ("pad", "breeze"): 122,                          # Seashore ~ breeze wash
+    ("melody", "whistle"): 78,                       # Whistle (GM's actual whistle)
+    ("bass", "bad_ground"): 125,                     # Helicopter ~ mains hum/rattle
 }
 
 _CHANNEL_TO_LAYER = {spec.channel: layer for layer, spec in LAYER_MIDI.items()}

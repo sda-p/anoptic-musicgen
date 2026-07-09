@@ -412,21 +412,34 @@ class Console:
             if patch == "morph":
                 node, total = patches.wavetable_pad_voice(
                     _hz(event.pitch), amp, dur_seconds, self.cutoff_out * 0.8, self.wavetable_bank)
+            elif patch == "breeze":
+                node, total = patches.breeze_voice(
+                    _hz(event.pitch), amp, dur_seconds, self.cutoff_out * 0.8, self.energy_ctl)
             else:
                 node, total = patches.pad_voice(_hz(event.pitch), amp, dur_seconds,
                                                 self.cutoff_out * 0.8, variant=patch or "warm")
         elif event.layer == "bass":
-            node, total = patches.bass_voice(_hz(event.pitch), amp, dur_seconds,
-                                             self.cutoff_out * 0.6 + 120.0, variant=patch or "round")
+            if patch == "bad_ground":
+                node, total = patches.bad_ground_voice(
+                    _hz(event.pitch), amp, dur_seconds, self.cutoff_out * 0.6 + 120.0, self.tension_ctl)
+            else:
+                node, total = patches.bass_voice(_hz(event.pitch), amp, dur_seconds,
+                                                 self.cutoff_out * 0.6 + 120.0, variant=patch or "round")
         elif event.layer == "melody":
             if patch == "keys":
                 node, total = patches.sampler_voice(
                     event.pitch, amp, dur_seconds, self.cutoff_out,
                     self.keys_sample, int(self.graph.sample_rate),
                     root_midi=self.keys_root, rate_scale=self.keys_rate_scale)
+            elif patch == "whistle":
+                node, total = patches.whistle_voice(
+                    _hz(event.pitch), amp, dur_seconds, self.cutoff_out, self.energy_ctl)
             else:
                 node, total = patches.lead_voice(_hz(event.pitch), amp, dur_seconds,
                                                  self.cutoff_out, variant=patch or "soft")
+        elif patch == "chimes":
+            node, total = patches.chime_voice(
+                event.pitch, _hz(event.pitch), amp, dur_seconds, self.cutoff_out)
         else:
             node, total = patches.arp_voice(_hz(event.pitch), amp, dur_seconds,
                                             variant=patch or "pluck")
