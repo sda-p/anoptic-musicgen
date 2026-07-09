@@ -193,6 +193,100 @@ def arp_voice(freq: float, amp: float, dur: float, variant: str = "pluck") -> tu
     return sf.StereoPanner(carrier * env * amp, -0.2), 0.002 + sustain + release
 
 
+# --- environmental / texture voices (Music Ticket DX-1413a) ------------------
+# Note-triggered like every other voice: a texture sounds for the duration of
+# whatever note its layer plays (long pad chords -> long washes; a busy arp ->
+# a flurry of chimes). Timbre rides the affect levers (the energy/tension
+# Smooth nodes passed in, exactly as the subtractive voices tap the cutoff),
+# and every noise source is seeded, so renders stay deterministic. They live
+# OUTSIDE the energy instrument tiers (control/mapping.py) — opt-in per layer
+# via the playground picker — so the default orchestration is untouched.
+
+def chime_voice(pitch: int, freq: float, amp: float, dur: float, cutoff) -> tuple[object, float]:
+    """Wind chimes: additive inharmonic metal-tube partials (tubular-bell
+    ratios) each with its own decay, so the top partials die first over a soft
+    strike chiff. Rings well past the note. Pan scatters deterministically by
+    pitch, so a run of chimes spreads across the field like a real set."""
+    ratios = (1.0, 2.76, 5.40, 8.93, 11.34)
+    decays = (1.0, 1.7, 2.6, 3.8, 5.2)   # higher partials ring shorter
+    gains = (1.0, 0.6, 0.35, 0.2, 0.12)
+    ring = min(dur + 1.6, 2.6)
+    body = None
+    for ratio, decay, gain in zip(ratios, decays, gains):
+        partial = sf.SineOscillator(freq * ratio) * (
+            gain * sf.ASREnvelope(0.001, 0.0, max(ring / decay, 0.05), curve=3.0))
+        body = partial if body is None else body + partial
+    chiff = (sf.SVFilter(_noise(0xC41E), "band_pass", cutoff=5200, resonance=0.4)
+             * sf.ASREnvelope(0.0005, 0.0, 0.02, curve=3.0) * 0.3)
+    filt = sf.SVFilter(body + chiff, "low_pass",
+                       cutoff=cutoff * 1.3 * _keytrack(freq, 0.2), resonance=0.05)
+    pan = ((pitch * 7) % 11) / 11.0 * 1.2 - 0.6   # deterministic scatter in -0.6..0.6
+    return sf.StereoPanner(filt * amp * 0.6, pan), ring + 0.1
+
+
+def breeze_voice(freq: float, amp: float, dur: float, cutoff, energy) -> tuple[object, float]:
+    """Sound of the breeze: two decorrelated noise streams band-passed into an
+    airy wash, breathing on a slow gust LFO with a faster rustle on top, under a
+    soft swell in and out. energy (a lever node) lifts the band brighter and
+    louder as things pick up — a light air vs. a gusty wind."""
+    total = dur + 1.4
+    swell = sf.ASREnvelope(0.6, max(dur - 0.6, 0.05), 0.9, curve=1.4)
+    gust = 0.55 + 0.45 * (sf.SineOscillator(0.13) * 0.5 + 0.5)     # ~8 s breathing
+    flutter = 0.85 + 0.15 * (sf.SineOscillator(0.9) * 0.5 + 0.5)   # leaf rustle
+    center = sf.Clip(360.0 + energy * 1400.0, 200.0, 3000.0)
+    air = sf.Clip(0.25 + energy * 0.4, 0.2, 0.7)
+
+    def side(seed: int, mult: float):
+        band = sf.SVFilter(_noise(seed), "band_pass", cutoff=center * mult, resonance=0.12)
+        return sf.SVFilter(band, "high_pass", cutoff=180.0, resonance=0.0)  # trim rumble
+
+    wash = sf.StereoPanner(side(0xB4EE, 1.0), -0.6) + sf.StereoPanner(side(0xB4EF, 1.18), 0.6)
+    return wash * gust * flutter * swell * amp * air, total
+
+
+def whistle_voice(freq: float, amp: float, dur: float, cutoff, energy) -> tuple[object, float]:
+    """Whistle of wind through the trees: a resonant band-pass 'sings' at the
+    note pitch (noise excitation -> a tonal whistle), sweetened by a soft sine
+    so it whistles the line, over a breath bed — the whole thing wavering on a
+    slow random pitch drift like wind through branches. Breath rises with
+    energy."""
+    total = dur + 0.6
+    drift = (1.0 + sf.SineOscillator(0.7) * 0.012
+             + sf.Smooth(sf.SampleAndHold(_noise(0x5A11), sf.Impulse(2.5)), 0.999) * 0.03)
+    sung = sf.SVFilter(_noise(0x5A12), "band_pass",
+                       cutoff=sf.Clip(freq * drift, 60.0, 8000.0), resonance=0.9) * 1.3
+    tone = sf.SineOscillator(freq * drift) * 0.35
+    breath = (sf.SVFilter(_noise(0x5A13), "high_pass", cutoff=2400.0, resonance=0.1)
+              * sf.Clip(0.1 + energy * 0.25, 0.05, 0.4))
+    env = sf.ASREnvelope(0.12, max(dur - 0.12, 0.05), 0.4, curve=1.5)
+    filt = sf.SVFilter(sung + tone + breath, "low_pass", cutoff=cutoff * 1.2, resonance=0.0)
+    return sf.StereoPanner(filt * env * amp * 0.7, 0.1), total
+
+
+def bad_ground_voice(freq: float, amp: float, dur: float, cutoff, tension) -> tuple[object, float]:
+    """Bad ground: a ~60 Hz mains hum gone wrong — buzzy (square + a saw
+    harmonic), flickering on a bad contact (slow random AM), with intermittent
+    high crackle/'psssht' bursts whose rate rides tension. Pitch nudges the hum
+    slightly so bass notes aren't identical, but it stays anchored low like real
+    mains hum."""
+    total = dur + 0.2
+    nudge = min(1.5, max(0.7, freq / 65.0))
+    fundamental = 60.0 * nudge
+    hum = sf.SVFilter(sf.SquareOscillator(fundamental) * 0.5
+                      + sf.SawOscillator(fundamental * 2.0) * 0.22,
+                      "low_pass", cutoff=760.0, resonance=0.35)
+    buzz = sf.SVFilter(hum, "band_pass", cutoff=1500.0, resonance=0.7) * 0.35
+    flicker = 0.6 + 0.4 * sf.Smooth(sf.SampleAndHold(_noise(0x6404), sf.Impulse(7.0)), 0.995)
+    sparks = sf.RandomImpulse(3.0 + tension * 14.0)  # crackle rate rides tension
+    sparks.set_seed(0x6405)
+    crackle = (sf.SVFilter(_noise(0x6406), "high_pass", cutoff=3200.0, resonance=0.2)
+               * sf.Smooth(sparks, 0.9) * sf.Clip(0.4 + tension * 0.5, 0.3, 0.95))
+    env = sf.ASREnvelope(0.004, max(dur - 0.004, 0.02), 0.12, curve=2.0)
+    body = (hum + buzz) * flicker + crackle
+    filt = sf.SVFilter(body, "low_pass", cutoff=sf.Clip(cutoff * 2.0, 400.0, 6000.0), resonance=0.0)
+    return sf.StereoPanner(filt * env * amp * 0.8, 0.0), total
+
+
 # --- drums (keyed by GM pitch, matching gen/perc.py's DRUMS map) -------------
 
 def _kick(amp: float) -> tuple[object, float]:
