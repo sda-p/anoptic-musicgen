@@ -27,6 +27,13 @@ export function PerformControls() {
   const imitation = Boolean(s.perform.imitation);
   const counter = Boolean(s.perform.counter);
   const rotate = Boolean(s.perform.rotate);
+  const anacrusis = Boolean(s.perform.anacrusis);
+  const tieSusp = Boolean(s.perform.tie_suspension);
+  const syncopation = Boolean(s.perform.syncopation);
+  const codetta = Boolean(s.perform.codetta);
+  const extension = Boolean(s.perform.extension);
+  const elision = Boolean(s.perform.elision);
+  const split64 = Boolean(s.perform.split_64);
   return (
     <div className="dramaturg-ctl">
       <div className="dramaturg-head">
@@ -161,6 +168,76 @@ export function PerformControls() {
         {rotate
           ? "texture rotation on · phrase-by-phrase texture states, withheld & released by the dramaturg"
           : "texture rotation off · enabled textures fire by affect"}
+      </label>
+      <label className={`toggle toggle-sub ${anacrusis ? "on" : ""}`}>
+        <input
+          type="checkbox"
+          checked={anacrusis}
+          onChange={(e) => api.setPerform({ anacrusis: e.target.checked })}
+        />
+        {anacrusis
+          ? "anacrusis on · pickups exhale into the next phrase, tied over when they land"
+          : "anacrusis off · phrase starts stay bar-aligned"}
+      </label>
+      <label className={`toggle toggle-sub ${tieSusp ? "on" : ""}`}>
+        <input
+          type="checkbox"
+          checked={tieSusp}
+          onChange={(e) => api.setPerform({ tie_suspension: e.target.checked })}
+        />
+        {tieSusp
+          ? "held suspensions on · the preparation genuinely held across the barline"
+          : "held suspensions off · preparations re-struck"}
+      </label>
+      <label className={`toggle toggle-sub ${syncopation ? "on" : ""}`}>
+        <input
+          type="checkbox"
+          checked={syncopation}
+          onChange={(e) => api.setPerform({ syncopation: e.target.checked })}
+        />
+        {syncopation
+          ? "cross-bar syncopation on · rough bars push through the barline"
+          : "cross-bar syncopation off · every downbeat attacks"}
+      </label>
+      <label className={`toggle toggle-sub ${codetta ? "on" : ""}`}>
+        <input
+          type="checkbox"
+          checked={codetta}
+          onChange={(e) => api.setPerform({ codetta: e.target.checked })}
+        />
+        {codetta
+          ? "codetta on · big payoffs earn a 2-bar tonic afterglow"
+          : "codetta off · payoffs re-enter the loop"}
+      </label>
+      <label className={`toggle toggle-sub ${extension ? "on" : ""}`}>
+        <input
+          type="checkbox"
+          checked={extension}
+          onChange={(e) => api.setPerform({ extension: e.target.checked })}
+        />
+        {extension
+          ? "extension on · hot withholds stretch the phrase, the cadence arrives late"
+          : "extension off · phrases keep fixed length"}
+      </label>
+      <label className={`toggle toggle-sub ${elision ? "on" : ""}`}>
+        <input
+          type="checkbox"
+          checked={elision}
+          onChange={(e) => api.setPerform({ elision: e.target.checked })}
+        />
+        {elision
+          ? "elision on · at high energy the resolution IS the next downbeat"
+          : "elision off · cadences settle before the next phrase"}
+      </label>
+      <label className={`toggle toggle-sub ${split64 ? "on" : ""}`}>
+        <input
+          type="checkbox"
+          checked={split64}
+          onChange={(e) => api.setPerform({ split_64: e.target.checked })}
+        />
+        {split64
+          ? "split 6/4 on · I64 → V inside the pre-cadence bar when drive is high"
+          : "split 6/4 off · the prepared cadence takes three bars"}
       </label>
       {shaping && s.performUi.length > 0 && (
         <ConstantsGrid

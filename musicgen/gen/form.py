@@ -21,8 +21,83 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from musicgen.gen.structure import PhrasePos
 from musicgen.theory.chords import Chord
 from musicgen.theory.scales import Scale
+
+
+@dataclass
+class Segment:
+    """One scheduled phrase (D2): where it starts, how long it runs, and what
+    it is. An "elision" segment starts ON the previous segment's cadence bar
+    (the one bar serving as both resolution and opening)."""
+
+    start: int
+    bars: int
+    kind: str = ""  # "" | "codetta" | "extension" | "elision"
+
+
+@dataclass
+class PhraseClock:
+    """The scheduled phrase clock (REFINEMENT_PLAN D2). Everything was 4 or 8
+    bars because phrase position was a pure div/mod; this replaces the
+    arithmetic with a SCHEDULE — a list of committed segments, extrapolated
+    with the default length beyond the frontier — so the dramaturg and the
+    planner can author codettas (a 2-bar tonic afterglow appended to a big
+    payoff), extensions (the pre-dominant stretched while withholding), and
+    elisions (the next phrase starting ON the cadence bar). With nothing
+    scheduled, position() reproduces structure.phrase_position exactly —
+    byte-identical, which is the regression anchor.
+
+    Commitments only ever touch the frontier (the first unscheduled phrase),
+    and every deviation is decided at a phrase's first bar — at least two
+    bars before any bar whose slot it changes, safely outside the one-bar
+    chord lookahead."""
+
+    phrase_bars: int = 8
+    segments: list[Segment] = field(default_factory=list)
+
+    def _frontier(self) -> int:
+        """The bar where extrapolation begins (after the last segment)."""
+        if not self.segments:
+            return 0
+        last = self.segments[-1]
+        return last.start + last.bars
+
+    def position(self, bar: int) -> PhrasePos:
+        # later segments win a shared bar: an elision's opening downbeat
+        # belongs to the NEW phrase (the old one's cadence is an annotation)
+        for idx in range(len(self.segments) - 1, -1, -1):
+            seg = self.segments[idx]
+            if seg.start <= bar < seg.start + seg.bars:
+                return PhrasePos(phrase=idx, pos=bar - seg.start, bars=seg.bars,
+                                 kind=seg.kind)
+        base = self._frontier()
+        if bar < base:  # inside no segment but before the frontier (unreachable
+            #             with contiguous commitments; defensive)
+            return PhrasePos(phrase=bar // self.phrase_bars,
+                             pos=bar % self.phrase_bars, bars=self.phrase_bars)
+        n = len(self.segments) + (bar - base) // self.phrase_bars
+        return PhrasePos(phrase=n, pos=(bar - base) % self.phrase_bars,
+                         bars=self.phrase_bars)
+
+    def materialize_through(self, phrase: int) -> None:
+        """Fill default segments up to and including `phrase` — observably a
+        no-op (defaults match extrapolation), but it moves the frontier so a
+        deviation can be appended right after."""
+        while len(self.segments) <= phrase:
+            self.segments.append(Segment(self._frontier(), self.phrase_bars))
+
+    def schedule(self, phrase: int, bars: int, kind: str = "",
+                 overlap: int = 0) -> Segment:
+        """Commit phrase `phrase` (which must be the frontier) with an
+        explicit length/kind; `overlap` starts it that many bars INSIDE the
+        previous segment (elision = 1)."""
+        self.materialize_through(phrase - 1)
+        assert len(self.segments) == phrase, "only the frontier is schedulable"
+        seg = Segment(self._frontier() - overlap, bars, kind)
+        self.segments.append(seg)
+        return seg
 
 
 @dataclass

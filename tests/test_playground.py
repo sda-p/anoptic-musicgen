@@ -132,7 +132,10 @@ def test_perform_controls():
                  "plan_apex": False, "counterpoint": False, "cadential_64": False,
                  "periods": False, "hypermeter": False, "bass_inversions": False,
                  "doubling": False, "animate": False, "imitation": False,
-                 "rotate": False, "counter": False}
+                 "rotate": False, "counter": False,
+                 "anacrusis": False, "tie_suspension": False, "syncopation": False,
+                 "codetta": False, "extension": False, "elision": False,
+                 "split_64": False}
     engine = st._build_engine()
     assert engine.config.cadence_rit == 0.0 and not engine.config.phrase_groove
     assert not engine.config.melody.plan_apex and not engine.config.melody.counterpoint
@@ -144,17 +147,26 @@ def test_perform_controls():
                            "counterpoint": True, "cadence_rit": 0.03, "cadential_64": True,
                            "periods": True, "hypermeter": True, "bass_inversions": True,
                            "doubling": True, "animate": True, "imitation": True,
-                           "rotate": True, "counter": True})
+                           "rotate": True, "counter": True,
+                           "anacrusis": True, "tie_suspension": True, "syncopation": True,
+                           "codetta": True, "extension": True, "elision": True,
+                           "split_64": True})
     engine = st._build_engine()
     from musicgen.modifiers import Perform
     assert any(isinstance(m, Perform) for m in engine.config.chains["melody"])
     assert engine.config.cadence_rit == 0.03 and engine.config.phrase_groove
     assert engine.config.melody.plan_apex and engine.config.melody.counterpoint
     assert engine.config.form == FormConfig(cadential_64=True, periods=True,
-                                            hypermeter=True, bass_inversions=True)
+                                            hypermeter=True, bass_inversions=True,
+                                            split_64=True)
     assert engine.config.texture == TextureConfig(doubling=True, animate=True,
                                                   imitation=True, rotate=True,
                                                   counter=True)
+    from musicgen.gen.conductor import ClockConfig, TieConfig
+    assert engine.config.ties == TieConfig(anacrusis=True, suspension=True,
+                                           syncopation=True)
+    assert engine.config.clock == ClockConfig(codetta=True, extension=True,
+                                              elision=True)
     st.set_perform_fields({"bogus_knob": 1.0})              # unknown field ignored, no crash
     assert "bogus_knob" not in st.snapshot()["perform"]
 

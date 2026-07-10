@@ -488,7 +488,7 @@ def test_counter_plant_crossing_is_caught():
 
 
 def test_counter_plant_parallel_is_caught():
-    engine, results = counter_run()
+    engine, results = counter_run(bars=48, affect=dict(valence=0.3, energy=0.55, tension=0.3))
     events, ctxs = raw(results), [r.context for r in results]
     meter = engine.config.meter
     strong = set(meter.strong_slots())

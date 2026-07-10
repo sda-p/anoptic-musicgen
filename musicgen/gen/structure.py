@@ -18,6 +18,7 @@ class PhrasePos:
     phrase: int  # 0-based phrase index
     pos: int     # 0-based bar within the phrase
     bars: int    # phrase length in bars
+    kind: str = ""  # D2 segment kind: "" (regular) | "codetta" | "extension" | "elision"
 
     @property
     def slot(self) -> str:
@@ -35,8 +36,23 @@ def phrase_position(bar: int, phrase_bars: int = 8) -> PhrasePos:
 
 
 def effective_tension(base: float, pos: PhrasePos) -> float:
+    """The within-phrase micro-arc. The 4- and 8-bar tables are the tuned
+    (frozen) shapes; elastic segments (D2) get the same shape parametrically —
+    rise from 0.85 to 1.30 at bars−2, settle to 0.75 at the cadence — and a
+    codetta sits low throughout (a tonic prolongation breathes, it does not
+    build)."""
+    if pos.kind == "codetta":
+        return max(0.0, min(1.0, base * 0.7))
     arc = ARCS.get(pos.bars)
-    factor = arc[pos.pos] if arc else 1.0
+    if arc:
+        factor = arc[pos.pos]
+    elif pos.bars <= 1:
+        factor = 1.0
+    elif pos.pos == pos.bars - 1:
+        factor = 0.75
+    else:
+        peak = max(1, pos.bars - 2)
+        factor = 0.85 + (1.30 - 0.85) * min(1.0, pos.pos / peak)
     return max(0.0, min(1.0, base * factor))
 
 

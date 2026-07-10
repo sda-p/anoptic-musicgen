@@ -12,7 +12,7 @@ from typing import Sequence
 
 import mido
 
-from musicgen.ir import Meter, NoteEvent
+from musicgen.ir import Meter, NoteEvent, merge_ties
 
 PPQ = 480
 
@@ -88,9 +88,11 @@ def write_midi(
     """Write events as SMF type 1: a conductor track (time signature, tempo
     map, markers) plus one track per layer present. instrument_changes emit
     GM program changes (GM_PATCHES); a layer without a beat-0 entry gets its
-    LayerSpec default, so old callers are unchanged."""
+    LayerSpec default, so old callers are unchanged. Tie chains (D1) are
+    merged first — MIDI has no tie, so a chain becomes the single note it
+    musically is (one note_on at the head, one note_off at the tail end)."""
     by_layer: dict[str, list[NoteEvent]] = {}
-    for ev in sorted(events, key=lambda e: (e.start, e.pitch)):
+    for ev in sorted(merge_ties(events), key=lambda e: (e.start, e.pitch)):
         by_layer.setdefault(ev.layer, []).append(ev)
     unknown = set(by_layer) - set(LAYER_MIDI)
     if unknown:
@@ -175,13 +177,15 @@ def read_notes(path: str | Path) -> list[ReadNote]:
 
 
 def verify_roundtrip(path: str | Path, events: Sequence[NoteEvent], tol_beats: float = 2.5 / PPQ) -> list[str]:
-    """Read the file back and diff it against the IR it was written from.
+    """Read the file back and diff it against the IR it was written from
+    (tie chains compared as the merged musical notes they were written as).
     Returns a list of problems (empty == clean)."""
     problems: list[str] = []
     got = read_notes(path)
     # Sort by quantized tick, not float start: sub-tick differences (humanize)
     # must not reorder the written side relative to the read-back side.
-    want = sorted(events, key=lambda e: (beats_to_ticks(e.start), LAYER_MIDI[e.layer].channel, e.pitch))
+    want = sorted(merge_ties(events),
+                  key=lambda e: (beats_to_ticks(e.start), LAYER_MIDI[e.layer].channel, e.pitch))
     got = sorted(got, key=lambda n: (round(n.start * PPQ), n.channel, n.pitch))
     if len(got) != len(want):
         problems.append(f"note count: wrote {len(want)}, read back {len(got)}")

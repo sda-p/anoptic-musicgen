@@ -56,7 +56,11 @@ class Swing:
 
 @dataclass(frozen=True)
 class Humanize:
-    """Gaussian timing/velocity jitter; never moves a note before its bar."""
+    """Gaussian timing/velocity jitter; never moves a note before its bar.
+    Tied events (D1) keep their timing — jittering a join would tear the
+    chain — and "in" halves keep their velocity too (a continuation has no
+    attack to vary). Draws happen for every event regardless, so the stream
+    stays aligned whether or not ties are present."""
 
     t_sigma: float = 0.015  # beats (~9 ms at 100 BPM)
     v_sigma: float = 5.0
@@ -67,6 +71,10 @@ class Humanize:
         for ev in events:
             dt = max(-2 * self.t_sigma, min(2 * self.t_sigma, rng.gauss(0.0, self.t_sigma)))
             dv = rng.gauss(0.0, self.v_sigma)
+            if ev.tie:
+                dt = 0.0
+            if ev.tie in ("in", "both"):
+                dv = 0.0
             out.append(replace(
                 ev,
                 start=round(max(bar_start, ev.start + dt), 6),
@@ -77,13 +85,16 @@ class Humanize:
 
 @dataclass(frozen=True)
 class Articulate:
-    """Scale sounding duration: staccato (<1) to legato overlap (>1)."""
+    """Scale sounding duration: staccato (<1) to legato overlap (>1).
+    Only chain-final segments scale (D1): shortening an "out"/"both" half
+    would open a gap inside what is musically one held note."""
 
     gate: float | None = None  # None -> params.articulation
 
     def apply(self, events, ctx, meter, params, rng) -> list[NoteEvent]:
         gate = params.articulation if self.gate is None else self.gate
-        return [replace(ev, dur=max(MIN_DUR, ev.dur * gate)) for ev in events]
+        return [ev if ev.tie in ("out", "both")
+                else replace(ev, dur=max(MIN_DUR, ev.dur * gate)) for ev in events]
 
 
 @dataclass(frozen=True)
@@ -140,11 +151,17 @@ class Perform:
             velocity = (ev.velocity * (1.0 + self.hairpin * (swell - 0.5))
                         + self.contour * (ev.pitch - params.register_center))
             start, dur = ev.start, ev.dur
-            if self.agogic and ctx.phrase_pos == 0 and meter.slot_of(ev.start) == 0:
+            if (self.agogic and ctx.phrase_pos == 0 and meter.slot_of(ev.start) == 0
+                    and ev.tie not in ("out", "both")):  # never stretch a join open
                 dur *= 1.0 + self.agogic
-            if lag:
+            if lag and not ev.tie:  # a tied half's timing IS the join
                 start = round(max(bar_start, start + lag), 6)
-            if self.luftpause and ctx.phrase_pos == bars - 1 and start < cut < start + dur:
+            # the anacrusis pickups (D1) live where the luftpause would carve:
+            # they ARE the breath, exhaled into the next downbeat — never cut
+            # them or any tied half short
+            if (self.luftpause and ctx.phrase_pos == bars - 1
+                    and not ev.tie and ev.role != "pickup"
+                    and start < cut < start + dur):
                 dur = max(MIN_DUR, cut - start)
             out.append(replace(ev, start=start, dur=dur, velocity=_clamp_velocity(velocity)))
         return out
@@ -168,6 +185,8 @@ class Echo:
         # not just coincident starts.
         spans = [(ev.start, ev.end, ev.pitch) for ev in events]
         for ev in events:
+            if ev.tie:
+                continue  # a chain is one note; echoing its halves would double it
             velocity = float(ev.velocity)
             for k in range(1, self.repeats + 1):
                 velocity *= self.decay
@@ -206,8 +225,13 @@ class Strum:
             n = len(chord)
             for i, ev in enumerate(chord):
                 offset = self.spread * i / (n - 1) if n > 1 else 0.0
-                out.append(replace(ev, start=round(ev.start + offset, 6),
-                                   dur=max(MIN_DUR, ev.dur - offset)))
+                if ev.tie in ("in", "both"):
+                    offset = 0.0  # a continuation has no attack to stagger
+                s = round(ev.start + offset, 6)
+                # a tied-out end IS the join: recompute the dur from the
+                # rounded start so the end stays bit-exact
+                dur = ev.end - s if ev.tie in ("out", "both") else ev.dur - offset
+                out.append(replace(ev, start=s, dur=max(MIN_DUR, dur)))
         return out
 
 

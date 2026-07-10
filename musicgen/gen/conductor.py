@@ -31,7 +31,7 @@ from musicgen.gen.arp import ArpConfig, PATTERNS as ARP_PATTERNS, generate_arp, 
 from musicgen.gen.bass import BassConfig, generate_bass
 from musicgen.gen.counter import CounterConfig, CounterState, generate_counter
 from musicgen.gen.dramaturg import Dramaturg, DramaturgConfig, Ledger, spend_magnitude
-from musicgen.gen.form import PeriodPlanner
+from musicgen.gen.form import PeriodPlanner, PhraseClock
 from musicgen.gen.imitation import generate_imitation
 from musicgen.gen.melody import (
     ApexPlan, MelodyConfig, MelodyState, Motif, generate_melody, make_apex,
@@ -49,7 +49,7 @@ from musicgen.theory.harmony import CADENCE_TARGET, HarmonyConfig, next_chord
 from musicgen.theory.modulation import Pivot, fifths_between, find_pivots
 from musicgen.theory.pitch import name_to_midi, pitch_name
 from musicgen.theory.scales import Scale
-from musicgen.theory.voicing import VoicingConfig
+from musicgen.theory.voicing import VoicingConfig, voice_chord
 
 DEFAULT_CADENCE_CYCLE = ("authentic", "half", "deceptive", "authentic")
 _MIN_MELODY_RANGE = 6  # floor the dramaturg's melody-range contraction stays above (lint-safe)
@@ -92,6 +92,9 @@ class FormConfig:
     period_prob: float = 0.65     # chance an eligible phrase pair commits to a period
     hypermeter: bool = False      # B3: bar weight within the phrase group
     bass_inversions: bool = False  # B4: stepwise bass lines via first inversions
+    split_64: bool = False         # D3 prototype: the 6/4 compressed into the
+    #                                pre-cadence bar — two chords in one bar
+    #                                (needs cadential_64; fires when drive is high)
 
 
 @dataclass(frozen=True)
@@ -121,6 +124,37 @@ _TEXTURES = ("monophonic", "homophonic", "doubled", "imitative", "counter")
 _TEXTURE_RETURN_PROB = 0.25  # chance a phrase revisits the texture of two ago
 
 
+@dataclass(frozen=True)
+class ClockConfig:
+    """Wave-D elastic form (REFINEMENT_PLAN D2), each off = byte-identical.
+    The PhraseClock schedules phrase segments instead of computing div/mod;
+    these gates author the three deviations. All are dramaturg/planner-scale
+    decisions taken at a phrase's first bar — outside the chord lookahead."""
+
+    codetta: bool = False       # a 2-bar tonic afterglow appended to a big spend
+    extension: bool = False     # the pre-dominant stretched while withholding runs hot
+    elision: bool = False       # the next phrase starts ON the cadence bar
+    codetta_payoff: float = 0.45   # spend magnitude that earns the afterglow
+    codetta_bars: int = 2
+    extension_tension: float = 0.7  # base tension at/above which a withhold stretches
+    elision_energy: float = 0.75    # energy at/above which arrivals become departures
+
+
+@dataclass(frozen=True)
+class TieConfig:
+    """Wave-D tie features (REFINEMENT_PLAN D1), each off = byte-identical.
+    The tie flag lets a musical note cross the barline as grid-legal halves
+    (the M8 invariant survives); these are the three gestures built on it."""
+
+    anacrusis: bool = False    # cadence-bar pickups stepping into the next
+    #                            phrase's downbeat, the last tied over when it
+    #                            lands on the goal tone
+    suspension: bool = False   # the M14 preparation genuinely HELD across the
+    #                            barline into its dissonance, not re-struck
+    syncopation: bool = False  # rough bars push their last note through the
+    #                            barline — the downbeat attack disappears
+
+
 @dataclass
 class EngineConfig:
     meter: Meter = field(default_factory=Meter)
@@ -141,7 +175,9 @@ class EngineConfig:
     phrase_groove: bool = False  # A2: pin perc/arp pattern draws per phrase — groove identity as
     #                              a contract; fills stay per-bar (off = per-bar rolls, byte-identical)
     form: FormConfig = field(default_factory=FormConfig)  # wave-B form features (B1–B4)
-    texture: TextureConfig = field(default_factory=TextureConfig)  # wave-C polyphony (C1–C3)
+    texture: TextureConfig = field(default_factory=TextureConfig)  # wave-C polyphony (C1–C5)
+    ties: TieConfig = field(default_factory=TieConfig)  # wave-D tie gestures (D1)
+    clock: ClockConfig = field(default_factory=ClockConfig)  # wave-D elastic form (D2)
     mapper: MappingTable | None = None
     chains: dict[str, tuple] = field(default_factory=default_chains)  # {} disables modifiers
     harmony: HarmonyConfig = field(default_factory=HarmonyConfig)
@@ -165,15 +201,21 @@ class ConductorState:
     prev_bass_root: int | None = None
     melody: MelodyState = field(default_factory=MelodyState)
     counter: CounterState = field(default_factory=CounterState)  # C5: the second line's memory
+    pad_tie: int | None = None  # D1: the pitch the pad tied out of last bar (the held prep)
     motifs: dict[int, Motif] = field(default_factory=dict)
     grooves: dict[int, Groove] = field(default_factory=dict)          # A2: re-derivable per-phrase cache
     arp_skips: dict[int, frozenset[int]] = field(default_factory=dict)  # A2: ditto
     apexes: dict[int, ApexPlan] = field(default_factory=dict)         # A4: ditto
     planner: PeriodPlanner = field(default_factory=PeriodPlanner)     # B2: period commitments
+    clock: PhraseClock = field(default_factory=PhraseClock)           # D2: the scheduled phrase clock
+    elisions: dict[int, int] = field(default_factory=dict)            # D2: shared bar -> resolving phrase
+    cadence_tail: tuple[tuple[int, int, int], ...] = ()               # D2: the last cadence gesture (codetta echo)
     imitation_cells: dict[int, Motif] = field(default_factory=dict)   # C3: cell echoed per phrase
     phrase_textures: dict[int, str] = field(default_factory=dict)     # C4: re-derivable per-phrase cache
     inversion_run: int = 0                                            # B4: consecutive inverted bars
     lament_bars: set[int] = field(default_factory=set)                # B4: bars the ground owns
+    splits: dict[int, Chord] = field(default_factory=dict)            # D3: bar -> its mid-bar chord
+    split_phrases: dict[int, bool] = field(default_factory=dict)      # D3: cached per-phrase decision
     motif_lifecycle: MotifLifecycle | None = None  # persistent signature (M15; None when disabled)
     motif_director: MotifDirector | None = None    # authored-signature selection (M17; None when no library)
     pending_signature: Motif | None = None         # the signature to state this phrase, or None
@@ -216,6 +258,7 @@ class MusicEngine:
         cfg = self.config
         self.seeder = Seeder(seed)
         self.state = ConductorState(key_tonic=cfg.key_tonic)
+        self.state.clock.phrase_bars = cfg.phrase_bars  # D2: default schedule = div/mod
         self.affect = Affect(cfg.valence, cfg.energy, cfg.tension).clamped()
         self.overrides: dict[str, object] = {}
         self._urgent = False
@@ -297,6 +340,11 @@ class MusicEngine:
         library is byte-identical."""
         return self.state.motif_director is not None and bool(self.state.motif_director.library)
 
+    def _pos(self, bar: int) -> structure.PhrasePos:
+        """Phrase position via the scheduled clock (D2) — with nothing
+        scheduled this reproduces structure.phrase_position exactly."""
+        return self.state.clock.position(bar)
+
     def _policy(self, phrase: int) -> str:
         plan = self.state.modulation
         if plan is not None and phrase == plan.cadence_phrase:
@@ -346,7 +394,7 @@ class MusicEngine:
 
     def _gen_chord(self, bar: int) -> tuple[int, Chord, str]:
         cfg = self.config
-        pos = structure.phrase_position(bar, cfg.phrase_bars)
+        pos = self._pos(bar)
 
         state = self.state
         if state.modulation is None and state.pending_key is not None:
@@ -363,6 +411,23 @@ class MusicEngine:
                 state.prev_chord = chord
                 return bar, chord, why
 
+        # D2 elision: the shared bar sounds the RESOLUTION — the new phrase
+        # opens on the tonic the old one promised (the forced I is what makes
+        # one bar honestly serve as both cadence and downbeat).
+        if bar in state.elisions:
+            chord = Chord(1)
+            state.prev_chord = chord
+            return bar, chord, "elision: the resolution IS the opening"
+
+        # D2 codetta: tonic prolongation — at most a plagal glance, then home.
+        if pos.kind == "codetta":
+            plagal = (pos.pos == 0 and pos.bars > 1
+                      and self.seeder.stream("codetta", bar).random() < 0.5)
+            chord = Chord(4) if plagal else Chord(1)
+            state.prev_chord = chord
+            return bar, chord, ("codetta: plagal IV before home" if plagal
+                                else "codetta: tonic afterglow")
+
         # B2: the consequent opens on the antecedent's harmony — the answer
         # asks the same question before resolving it.
         if cfg.form.periods and pos.pos == 0 and state.planner.role(pos.phrase) == "consequent":
@@ -370,6 +435,15 @@ class MusicEngine:
             if opening is not None:
                 state.prev_chord = opening
                 return bar, opening, "period: consequent opens on the antecedent's harmony"
+
+        # D3 prototype: the compressed 6/4 — the pre-cadence bar carries BOTH
+        # I64 (downbeat) and V (mid-bar pulse): two chords in one bar, the
+        # cadence approach accelerating instead of spreading over three bars.
+        if pos.slot == "pre-cadence" and self._wants_split(pos):
+            chord = Chord(1, inversion=2)
+            state.splits[bar] = Chord(5)
+            state.prev_chord = Chord(5)  # the cadence continues from the sounding V
+            return bar, chord, "split 6/4: I64 -> V within the bar (D3)"
 
         # B1: the cadential 6/4 — a prepared authentic cadence. The free bar
         # before the pre-cadence sounds I over the dominant's bass (I64), the
@@ -457,6 +531,27 @@ class MusicEngine:
         state.inversion_run = state.inversion_run + 1 if best else 0
         return chord, why
 
+    def _wants_split(self, pos: structure.PhrasePos) -> bool:
+        """D3 prototype: compress the cadential 6/4 into the pre-cadence bar —
+        I64 on the downbeat, V on the mid-bar pulse, two chords in one bar:
+        the true cadence-approach acceleration (B1's three-bar formula is the
+        stately form; this is the driving one). Cached per phrase so the
+        one-bar chord lookahead stays consistent across the decision."""
+        cfg, state = self.config, self.state
+        if (not (cfg.form.split_64 and cfg.form.cadential_64) or pos.bars < 4
+                or pos.kind == "codetta"):
+            return False
+        if pos.phrase not in state.split_phrases:
+            state.split_phrases[pos.phrase] = (
+                state.modulation is None
+                and self._policy(pos.phrase) == "authentic"
+                and self.affect.energy >= 0.6
+                and (self.affect.tension >= 0.25
+                     or (self._dramaturg_on
+                         and state.ledger.phrase_cadence.get(pos.phrase) == "authentic")
+                     or (cfg.form.periods and state.planner.role(pos.phrase) == "consequent")))
+        return state.split_phrases[pos.phrase]
+
     def _wants_64(self, pos: structure.PhrasePos) -> bool:
         """Deploy the cadential 6/4 (B1) at the bars-3 free slot of a phrase
         headed for an authentic cadence — always on a dramaturg spend or a
@@ -466,6 +561,8 @@ class MusicEngine:
         if (not cfg.form.cadential_64 or pos.bars < 4 or pos.pos != pos.bars - 3
                 or self.state.modulation is not None):
             return False
+        if self._wants_split(pos):
+            return False  # D3: the compressed form owns this phrase's cadence approach
         if self._policy(pos.phrase) != "authentic":
             return False
         if self._dramaturg_on and self.state.ledger.phrase_cadence.get(pos.phrase) == "authentic":
@@ -526,6 +623,8 @@ class MusicEngine:
         ov = self.overrides.get("texture")
         if ov is not None:
             tex, note = str(ov), "override"
+        elif pos.kind == "codetta":
+            tex, note = prev or "homophonic", "the afterglow keeps the texture"
         elif directive is not None and directive.payoff > 0:
             tex, note = max(pool, key=_TEXTURES.index), "spend releases the richest"
         elif directive is not None and directive.withhold_root_tonic:
@@ -587,7 +686,7 @@ class MusicEngine:
             dominant_bar=pivot_bar + 1,
             arrival_bar=arrival,
             pivot=pivots[0] if pivots else None,
-            cadence_phrase=(structure.phrase_position(arrival, self.config.phrase_bars).phrase
+            cadence_phrase=(self._pos(arrival).phrase
                             if aligned else None),
         )
 
@@ -692,7 +791,7 @@ class MusicEngine:
             layers=state.active_layers,
             harmonic_rhythm=self._harmonic_rhythm(),
             dissonance_budget=a.tension,
-            cadence_policy=self._policy(structure.phrase_position(bar, cfg.phrase_bars).phrase),
+            cadence_policy=self._policy(self._pos(bar).phrase),
             filter_cutoff=float(ov.get("filter_cutoff", mapping.filter_cutoff_target(a, table))),
             reverb_send=float(ov.get("reverb_send", mapping.reverb_send_target(a, table))),
             delay_send=float(ov.get("delay_send", mapping.delay_send_target(a, table))),
@@ -717,17 +816,63 @@ class MusicEngine:
     def advance_bar(self) -> BarResult:
         cfg, state = self.config, self.state
         bar = state.bar
-        pos = structure.phrase_position(bar, cfg.phrase_bars)
+        pos = self._pos(bar)
+
+        # D2 extension: while a sustained withhold runs hot, this phrase's
+        # pre-dominant stretches by two bars. Decided BEFORE the dramaturg
+        # reads pos, so the ledger accrues the stretched length — the
+        # deceptive cadence genuinely arrives late, and the debt says so.
+        clock_note = ""
+        if (cfg.clock.extension and pos.pos == 0 and pos.kind == "" and bar > 0
+                and self._dramaturg_on and state.ledger.withholding_phrases > 0
+                and self.affect.tension >= max(cfg.clock.extension_tension,
+                                               self.dramaturg.cfg.accrue_above)
+                and state.planner.role(pos.phrase) == ""
+                and len(state.clock.segments) <= pos.phrase
+                and state.modulation is None and state.pending_key is None
+                and self.seeder.stream("clock", pos.phrase).random() < 0.6):
+            state.clock.schedule(pos.phrase, cfg.phrase_bars + 2, "extension")
+            pos = self._pos(bar)
+            clock_note = (f"clock: phrase {pos.phrase} stretched to {pos.bars} bars "
+                          f"(the deceptive cadence arrives late)")
 
         # Dramaturg (§5.8, M13): decide this phrase's cadence rationing at pos 0,
         # before its cadence chord is generated ahead. Gated — a no-op when off.
+        # A codetta (D2) sits OUTSIDE the debt loop: the afterglow neither
+        # accrues nor spends, so the payoff breathes instead of re-entering.
         directive = None
         dramaturg_note = ""
-        if self._dramaturg_on:
+        if self._dramaturg_on and pos.kind != "codetta":
             directive = self.dramaturg.on_bar(state.ledger, self.affect.tension, pos)
             dramaturg_note = directive.note
 
+        # D2 codetta / elision, decided once the phrase's policy is settled:
+        # a big spend earns a two-bar tonic afterglow; failing that, a hot
+        # authentic phrase may hand its cadence bar to the next phrase — the
+        # arrival IS the departure.
+        if (pos.pos == 0 and pos.kind == "" and (cfg.clock.codetta or cfg.clock.elision)
+                and state.modulation is None and state.pending_key is None
+                and len(state.clock.segments) <= pos.phrase):
+            if (cfg.clock.codetta and directive is not None
+                    and directive.payoff >= cfg.clock.codetta_payoff):
+                state.clock.materialize_through(pos.phrase)
+                state.clock.schedule(pos.phrase + 1, cfg.clock.codetta_bars, "codetta")
+                clock_note = (f"clock: codetta after the spend "
+                              f"(payoff {directive.payoff:.2f} gets room to breathe)")
+            elif (cfg.clock.elision and self.affect.energy >= cfg.clock.elision_energy
+                    and self._policy(pos.phrase) == "authentic"
+                    and not (directive is not None and directive.payoff > 0)
+                    and state.planner.role(pos.phrase) == ""
+                    and self.seeder.stream("clock", pos.phrase).random() < 0.5):
+                state.clock.materialize_through(pos.phrase)
+                seg = state.clock.schedule(pos.phrase + 1, cfg.phrase_bars,
+                                           "elision", overlap=1)
+                state.elisions[seg.start] = pos.phrase
+                clock_note = (f"clock: phrase {pos.phrase + 1} elides — "
+                              f"the resolution IS its downbeat")
+
         if (cfg.wander_phrases is not None and pos.pos == 0 and bar > 0
+                and pos.kind != "codetta"
                 and state.pending_key is None and state.modulation is None
                 and pos.phrase - state.last_key_phrase >= cfg.wander_phrases):
             state.pending_key = (self._wander_target(pos.phrase), False)
@@ -737,9 +882,10 @@ class MusicEngine:
         # question–answer pair. Decided before the mapper samples this phrase's
         # policy, so the antecedent's half cadence is in force from bar one.
         period_note = ""
-        if cfg.form.periods and pos.pos == 0:
+        if cfg.form.periods and pos.pos == 0 and pos.kind == "":
             if (pos.phrase % 2 == 0 and pos.phrase not in state.planner.periods
                     and state.modulation is None and state.pending_key is None
+                    and len(state.clock.segments) <= pos.phrase + 1  # both halves default-length
                     and not (self._dramaturg_on and pos.phrase in state.ledger.phrase_cadence)):
                 if self.seeder.stream("period", pos.phrase).random() < cfg.form.period_prob:
                     state.planner.commit(pos.phrase)
@@ -753,7 +899,7 @@ class MusicEngine:
         # the barline) but ignore the modulation window — timbre is harmless
         # to the pivot analysis. Read _urgent before the mode block clears it.
         instr_note = ""
-        if cfg.mapper is not None and (pos.pos == 0 or self._urgent):
+        if cfg.mapper is not None and pos.kind != "codetta" and (pos.pos == 0 or self._urgent):
             pinned_instr = self.overrides.get("instruments")
             picked = (tuple(pinned_instr) if pinned_instr is not None  # type: ignore[arg-type]
                       else mapping.pick_instruments(state.current_instruments, self.affect.energy, cfg.mapper))
@@ -765,7 +911,9 @@ class MusicEngine:
 
         # The mode holds while a modulation window is active so the pivot
         # analysis stays true; a deferred urgent flag fires after arrival.
-        if cfg.mapper is not None and (pos.pos == 0 or self._urgent) and state.modulation is None:
+        # A codetta holds everything (the spend's brightening must outlast it).
+        if (cfg.mapper is not None and pos.kind != "codetta"
+                and (pos.pos == 0 or self._urgent) and state.modulation is None):
             pinned = self.overrides.get("mode", cfg.mode)
             state.current_mode = str(pinned) if pinned else mapping.pick_mode(
                 state.current_mode, self.affect.valence, cfg.mapper)
@@ -822,7 +970,7 @@ class MusicEngine:
         # "counter" is in force (or, un-rotated, whenever there is energy
         # enough to carry two lines) and there is a melody to counter.
         if (cfg.texture.counter and "melody" in params.layers
-                and "counter" not in params.layers
+                and "counter" not in params.layers and pos.kind != "codetta"
                 and (params.texture == "counter" if (cfg.texture.rotate or params.texture)
                      else self.affect.energy > 0.45)):
             params = replace(params, layers=params.layers + ("counter",))
@@ -838,7 +986,7 @@ class MusicEngine:
                 state.motif_lifecycle = MotifLifecycle(make_signature(
                     self.seeder.stream("signature"), params.note_density,
                     params.roughness, cfg.melody, slots=cfg.meter.slots))
-            if pos.pos == 0:
+            if pos.pos == 0 and pos.kind != "codetta":  # the afterglow is no new phrase
                 spend = directive is not None and directive.payoff > 0
                 state.motif_lifecycle.advance(spend, pos.phrase)
             lifecycle_state = state.motif_lifecycle.state
@@ -848,7 +996,7 @@ class MusicEngine:
         # crests with the melody's peak instead of at a fixed position.
         apex = None
         apex_note = ""
-        if cfg.melody.plan_apex:
+        if cfg.melody.plan_apex and pos.kind != "codetta":  # the echo owns its own shape
             if pos.phrase not in state.apexes:
                 state.apexes[pos.phrase] = make_apex(
                     self.seeder.stream("apex", pos.phrase), pos.bars,
@@ -869,6 +1017,8 @@ class MusicEngine:
         next_scale = Scale(self._tonic_for_bar(bar + 1), state.current_mode)
 
         slot = pos.slot if pos.slot in ("pre-cadence", "cadence") else ""
+        if pos.kind == "codetta":
+            slot = ""  # the afterglow has no cadence to promise
         plan = state.modulation
         mod_note = ""
         if plan is not None and bar in plan.bars:
@@ -897,10 +1047,21 @@ class MusicEngine:
             phrase_bars=pos.bars,
             phrase_apex=apex.pos if apex is not None else -1,
             form=state.planner.role(pos.phrase),
+            chords=(((0.0, chord), (cfg.meter.bar_quarters / 2, state.splits[bar]))
+                    if bar in state.splits else ()),
         )
+        if bar in state.elisions:
+            # the shared bar (D2) carries the OLD phrase's cadence as an
+            # annotation over the NEW phrase's downbeat — the lint verifies
+            # the promised policy resolves on the forced tonic
+            ctx.cadence_slot = "cadence"
+            ctx.cadence_policy = self._policy(state.elisions[bar])
 
         events: list[NoteEvent] = []
-        trace = [f"bar {bar + 1} [{pos.slot}] {ctx.chord_sym} ({self.scale.name}): {chord_trace}"]
+        trace = [f"bar {bar + 1} [{pos.slot}{'·' + pos.kind if pos.kind else ''}] "
+                 f"{ctx.chord_sym} ({self.scale.name}): {chord_trace}"]
+        if clock_note:
+            trace.append(clock_note)
         if dramaturg_note:
             trace.append(dramaturg_note)
         if rit:
@@ -917,7 +1078,7 @@ class MusicEngine:
         # Authored signatures (§5.5, M17): at a phrase boundary the director weighs
         # each signature's overdue×importance against how well this phrase's harmony
         # hosts it; a selection is stated faithfully across the phrase (below).
-        if self._director_on and pos.pos == 0:
+        if self._director_on and pos.pos == 0 and pos.kind != "codetta":
             leniency = self.dramaturg.cfg.leniency if self._dramaturg_on else cfg.motif_leniency
             lo = params.register_center - cfg.melody.range_semitones
             hi = params.register_center + cfg.melody.range_semitones
@@ -956,7 +1117,27 @@ class MusicEngine:
         layers = params.layers
         bass_events: list[NoteEvent] = []  # realized bass (A3: the melody's outer-voice guard reads it)
         prev_bass_root = state.prev_bass_root  # last bar's realized downbeat (A3 cadence yardstick)
-        if "pad" in layers:
+        if "pad" in layers and bar in state.splits:
+            # D3 prototype: the split bar re-voices at the mid-bar pulse —
+            # two voice-led half-bar blocks (I64 then V). Ornaments and
+            # animation stand down; the harmonic motion IS the event.
+            from musicgen.gen.pad import PAD_VELOCITY_OFFSET as _PVO
+            half = cfg.meter.bar_quarters / 2
+            vel = max(1, min(127, params.velocity_center + _PVO))
+            v1, _ = voice_chord(chord.pitch_classes(self.scale), state.prev_voicing,
+                                cfg.voicing)
+            v2, _ = voice_chord(state.splits[bar].pitch_classes(self.scale), v1,
+                                cfg.voicing)
+            for offset, voicing_now in ((0.0, v1), (half, v2)):
+                for pitch in voicing_now:
+                    events.append(NoteEvent(
+                        bar * cfg.meter.bar_quarters + offset, half, pitch, vel, "pad",
+                        degree=self.scale.degree_of(pitch), chord=ctx.chord_sym,
+                        role="chord-tone" if self.scale.contains(pitch) else "borrowed"))
+            state.prev_voicing = v2
+            state.pad_tie = None
+            trace.append(f"pad: split re-voicing {v1} -> {v2} at the pulse")
+        elif "pad" in layers:
             # C2 inner-voice animation: connective passing tones when sparse,
             # broken-figure comping at mid density, blocks when the other
             # layers carry the motion. Stands down through the cadence zone of
@@ -973,6 +1154,17 @@ class MusicEngine:
                         animate = "connective"
                     elif params.note_density < 0.62:
                         animate = "comping"
+            # D1: the bar BEFORE a controlled pre-cadence holds next bar's
+            # suspension preparation across the barline instead of re-striking
+            # it (the C2 stand-down zone guarantees this bar is a block).
+            tie_prep = None
+            if (cfg.ties.suspension and self._dramaturg_on
+                    and self.dramaturg.cfg.earned_dissonance
+                    and state.ledger.phrase_cadence.get(pos.phrase) is not None
+                    and pos.pos == pos.bars - 3
+                    and not self._wants_split(pos)):  # a split bar hosts no suspension
+                tie_prep = (upcoming.pitch_classes(next_scale),
+                            set(upcoming.voiced_pcs(next_scale)), next_scale)
             pad_events, voicing, pad_trace = generate_pad(
                 ctx, cfg.meter, params, state.prev_voicing, cfg.voicing,
                 suspend=directive is not None and directive.suspend,
@@ -980,10 +1172,15 @@ class MusicEngine:
                 next_pcs=upcoming.pitch_classes(next_scale) if animate else None,
                 animate=animate,
                 rng=self.seeder.stream("pad", bar) if animate else None,
-                thin=params.texture == "monophonic")
+                thin=params.texture == "monophonic",
+                tie_prep=tie_prep, prev_tie=state.pad_tie)
             events.extend(pad_events)
             state.prev_voicing = voicing
+            state.pad_tie = next((e.pitch for e in pad_events
+                                  if e.tie in ("out", "both")), None)
             trace.append(pad_trace)
+        else:
+            state.pad_tie = None  # a silent pad bar dissolves any pending prep
         if "bass" in layers:
             bass_events, root, bass_trace = generate_bass(
                 ctx, cfg.meter, params, state.prev_bass_root,
@@ -995,7 +1192,28 @@ class MusicEngine:
             events.extend(bass_events)
             state.prev_bass_root = root
             trace.append(bass_trace)
-        if "melody" in layers:
+        if "melody" in layers and pos.kind == "codetta":
+            # D2 codetta: the melody echoes the cadence gesture's tail an
+            # octave up (realize-faithful in spirit: the shape verbatim,
+            # licensed whole), then rests — payoffs breathe.
+            mel_events: list[NoteEvent] = []
+            if pos.pos == 0 and state.cadence_tail:
+                hi_win = params.register_center + cfg.melody.range_semitones
+                base_slot = state.cadence_tail[0][0]
+                for slot, dur, pitch in state.cadence_tail:
+                    p = pitch + 12 if pitch + 12 <= hi_win else pitch
+                    mel_events.append(NoteEvent(
+                        bar * cfg.meter.bar_quarters + (slot - base_slot) * GRID,
+                        dur * GRID, p, max(1, params.velocity_center - 6), "melody",
+                        degree=ctx.scale.degree_of(p), chord=ctx.chord_sym, role="motif"))
+                events.extend(mel_events)
+                trace.append(f"melody: codetta echo (cadence tail 8va) n={len(mel_events)}")
+            else:
+                trace.append("melody: codetta rest")
+            state.melody = MelodyState(
+                prev_pitch=mel_events[-1].pitch if mel_events else state.melody.prev_pitch,
+                prev_anchor=state.melody.prev_anchor, prev_outer=None)
+        elif "melody" in layers:
             mel_cfg = cfg.melody
             if directive is not None and directive.register_cap:
                 # contract the melody's ambit while withholding; it opens back up
@@ -1029,9 +1247,20 @@ class MusicEngine:
                 bass=bass_events, replay=replay,
                 double=self._wants_doubling(params.texture),
                 prev_bass=prev_bass_root,
+                anacrusis_rng=(self.seeder.stream("pickup", bar)
+                               if cfg.ties.anacrusis else None),
+                syncopate_rng=(self.seeder.stream("syncopate", bar)
+                               if cfg.ties.syncopation else None),
             )
             events.extend(mel_events)
             state.melody = mel_state
+            if pos.slot == "cadence" and mel_events:
+                # the cadence gesture's tail, remembered for a codetta echo (D2)
+                surface = sorted((e for e in mel_events if e.role != "doubling"),
+                                 key=lambda e: e.start)
+                state.cadence_tail = tuple(
+                    (cfg.meter.slot_of(e.start), max(1, round(e.dur / GRID)), e.pitch)
+                    for e in surface[-3:])
             if cfg.form.periods and pos.pos == 0 and state.planner.role(pos.phrase) == "antecedent":
                 state.planner.opening_chord[pos.phrase] = chord
                 state.planner.opening_scale[pos.phrase] = self.scale
@@ -1048,7 +1277,7 @@ class MusicEngine:
             # landing for free), else the phrase's own motif. Hosted by the arp
             # when it plays; by the pad's top voice while the dramaturg holds
             # the arp hostage (the echo survives the withholding).
-            if (cfg.texture.imitation and pos.pos == 1
+            if (cfg.texture.imitation and pos.pos == 1 and pos.kind != "codetta"
                     and (not params.texture or params.texture == "imitative")
                     and pos.phrase not in state.imitation_cells
                     and ("arp" in layers or "pad" in layers)):
@@ -1105,20 +1334,24 @@ class MusicEngine:
             events.extend(arp_events)
             trace.append(arp_trace)
         if "perc" in layers:
+            # D2 codetta: the kit thins to half density — the afterglow keeps
+            # time without driving
+            perc_params = (replace(params, note_density=params.note_density * 0.5)
+                           if pos.kind == "codetta" else params)
             groove = None
             if cfg.phrase_groove:  # A2: pattern draws pinned; the fill stays per-bar
                 if pos.phrase not in state.grooves:
                     state.grooves[pos.phrase] = make_groove(
                         self.seeder.stream("perc-pattern", pos.phrase), cfg.meter,
-                        params.note_density, params.roughness, cfg.perc)
+                        perc_params.note_density, perc_params.roughness, cfg.perc)
                     g = state.grooves[pos.phrase]
                     trace.append(f"groove: phrase {pos.phrase} pinned (ghosts {len(g.ghosts)}, "
                                  f"hat drops {len(g.hat_drops)}, ohat {g.ohat})")
                 groove = state.grooves[pos.phrase]
             perc_events, fill, perc_trace = generate_perc(
-                ctx, cfg.meter, params, pos, state.last_fill,
+                ctx, cfg.meter, perc_params, pos, state.last_fill,
                 cfg.perc, self.seeder.stream("perc", bar), groove=groove,
-                hyper_fill=0.35 if cfg.form.hypermeter else 0.0,
+                hyper_fill=0.35 if cfg.form.hypermeter and pos.kind == "" else 0.0,
             )
             events.extend(perc_events)
             state.last_fill = fill

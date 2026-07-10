@@ -20,7 +20,9 @@ import argparse
 from common import emit, standard_args
 
 from musicgen.control.mapping import MappingTable
-from musicgen.gen.conductor import EngineConfig, FormConfig, MusicEngine, TextureConfig
+from musicgen.gen.conductor import (
+    ClockConfig, EngineConfig, FormConfig, MusicEngine, TextureConfig, TieConfig,
+)
 from musicgen.gen.dramaturg import DramaturgConfig
 from musicgen.gen.melody import MelodyConfig
 from musicgen.modifiers import default_chains
@@ -38,8 +40,10 @@ def build(seed: int, dramaturg: DramaturgConfig | None) -> MusicEngine:
         chains=default_chains(perform=True), cadence_rit=0.025, phrase_groove=True,
         melody=MelodyConfig(plan_apex=True, counterpoint=True),
         form=FormConfig(cadential_64=True, periods=True,
-                        hypermeter=True, bass_inversions=True),
-        texture=TEXTURE))
+                        hypermeter=True, bass_inversions=True, split_64=True),
+        texture=TEXTURE,
+        ties=TieConfig(anacrusis=True, suspension=True, syncopation=True),
+        clock=ClockConfig(codetta=True, extension=True, elision=True)))
 
 
 def report(name: str, engine: MusicEngine, results) -> None:
@@ -49,20 +53,25 @@ def report(name: str, engine: MusicEngine, results) -> None:
     violations = (lint(raw, ctxs) + lint_outer(raw, ctxs) + lint_periods(raw, ctxs)
                   + lint_groove(raw, ctxs, pbb) + lint_texture(raw, ctxs, pbb)
                   + lint_imitation(raw, ctxs, engine.state.imitation_cells))
-    bars = engine.config.phrase_bars
     stats: dict[int, dict[str, int]] = {}
     for e in raw:
-        s = stats.setdefault(engine.config.meter.bar_of(e.start) // bars, {})
+        phrase = engine.state.clock.position(engine.config.meter.bar_of(e.start)).phrase
+        s = stats.setdefault(phrase, {})
         key = ("doubling" if e.role == "doubling" else "imitation" if e.role == "imitation"
                else "counter" if e.layer == "counter" else "")
         if key:
             s[key] = s.get(key, 0) + 1
+    kinds = {i: s.kind for i, s in enumerate(engine.state.clock.segments) if s.kind}
     print(f"  {name}")
     for phrase in sorted(engine.state.phrase_textures):
         tex = engine.state.phrase_textures[phrase]
         s = stats.get(phrase, {})
         extra = " ".join(f"{k}={v}" for k, v in sorted(s.items()))
-        print(f"    phrase {phrase}: {tex:<11} {extra}")
+        kind = f" [{kinds[phrase]}]" if phrase in kinds else ""
+        print(f"    phrase {phrase}: {tex:<11}{kind} {extra}")
+    ties = sum(1 for e in raw if e.tie)
+    if ties or engine.state.splits:
+        print(f"    ties {ties} │ split 6/4s {len(engine.state.splits)}")
     print(f"    all lint families {'CLEAN' if not violations else f'{len(violations)} VIOLATIONS'}")
     for v in violations[:5]:
         print(f"      {v}")

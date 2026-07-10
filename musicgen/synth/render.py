@@ -18,7 +18,7 @@ from typing import Callable
 
 from musicgen.clock import BeatClock
 from musicgen.control.automation import affect_at
-from musicgen.ir import Meter
+from musicgen.ir import Meter, merge_ties
 from musicgen.synth.console import Console, ConsoleConfig
 
 _KIND_PARAMS, _KIND_NOTE, _KIND_REMOVE = 0, 1, 2
@@ -75,19 +75,26 @@ def render_offline(
     try:
         console = Console(graph, config or ConsoleConfig())
         clock = BeatClock(0.0)
+        for r in results:  # the whole tempo map first: merged notes span bars
+            for beat, bpm in r.tempo_points:
+                clock.add_tempo_point(beat, bpm)
 
+        # D1 tie chains merge into single sustained voices offline — one
+        # envelope for what is musically one note. merge_ties preserves the
+        # emission order of surviving events, so tie-free renders schedule
+        # (and therefore sound) exactly as before. The REALTIME path cannot
+        # merge across bars (one-shot envelopes can't extend retroactively)
+        # and re-articulates each tied half instead — documented first cut.
         schedule: list[tuple[int, int, object]] = []
         last_note_end = 0
         for r in results:
-            for beat, bpm in r.tempo_points:
-                clock.add_tempo_point(beat, bpm)
             bar_frame = int(clock.time_at(r.bar * meter.bar_quarters) * sample_rate)
             schedule.append((bar_frame, _KIND_PARAMS, r))
-            for ev in r.events:
-                on = clock.time_at(ev.start)
-                schedule.append((int(on * sample_rate), _KIND_NOTE,
-                                 (ev, clock.time_at(ev.end) - on)))
-                last_note_end = max(last_note_end, int(clock.time_at(ev.end) * sample_rate))
+        for ev in merge_ties([ev for r in results for ev in r.events]):
+            on = clock.time_at(ev.start)
+            schedule.append((int(on * sample_rate), _KIND_NOTE,
+                             (ev, clock.time_at(ev.end) - on)))
+            last_note_end = max(last_note_end, int(clock.time_at(ev.end) * sample_rate))
         schedule.sort(key=lambda item: (item[0], item[1]))
 
         # Synchronous capture: record the master into a preallocated buffer
@@ -250,7 +257,9 @@ class RealtimeSynthPlayer:
                     self.engine.dramaturg = Dramaturg(command[1])
             elif command[0] == "perform":
                 from dataclasses import replace as _replace
-                from musicgen.gen.conductor import FormConfig, TextureConfig
+                from musicgen.gen.conductor import (
+                    ClockConfig, FormConfig, TextureConfig, TieConfig,
+                )
                 from musicgen.modifiers import default_chains
                 f, cfg = command[1], self.engine.config
                 cfg.chains = default_chains(perform=bool(f["shaping"]))
@@ -261,12 +270,19 @@ class RealtimeSynthPlayer:
                 cfg.form = FormConfig(cadential_64=bool(f["cadential_64"]),
                                       periods=bool(f["periods"]),
                                       hypermeter=bool(f["hypermeter"]),
-                                      bass_inversions=bool(f["bass_inversions"]))
+                                      bass_inversions=bool(f["bass_inversions"]),
+                                      split_64=bool(f["split_64"]))
                 cfg.texture = TextureConfig(doubling=bool(f["doubling"]),
                                             animate=bool(f["animate"]),
                                             imitation=bool(f["imitation"]),
                                             rotate=bool(f["rotate"]),
                                             counter=bool(f["counter"]))
+                cfg.ties = TieConfig(anacrusis=bool(f["anacrusis"]),
+                                     suspension=bool(f["tie_suspension"]),
+                                     syncopation=bool(f["syncopation"]))
+                cfg.clock = ClockConfig(codetta=bool(f["codetta"]),
+                                        extension=bool(f["extension"]),
+                                        elision=bool(f["elision"]))
             elif command[0] == "key":
                 self.engine.request_key(command[1], urgent=command[2])
 

@@ -94,7 +94,11 @@ def generate_counter(
     melody_slots = {meter.slot_of(e.start) for e in surface}
     kept = [(s, d) for s, d in cell if s not in melody_slots]
     if not kept:
-        kept = [max(cell, key=lambda sd: sd[1])]  # one oblique point of contact
+        # a saturated melody leaves no holes: the counter rests the bar
+        # rather than shadow an onset — complementarity is the contract
+        return [], CounterState(prev_pitch=state.prev_pitch, guide_pc=state.guide_pc,
+                                vs_melody=state.vs_melody, vs_bass=state.vs_bass), \
+            "counter: melody saturated, rests"
 
     # the guide thread continues regardless of what sounds — it is the
     # skeleton the strong beats reach for

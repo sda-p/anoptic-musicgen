@@ -90,6 +90,9 @@ class Meter:
         return tuple(s for s, w in enumerate(self.metric_weights()) if w >= 3.0)
 
 
+TIE_VALUES = ("", "out", "in", "both")
+
+
 @dataclass
 class NoteEvent:
     start: float  # absolute quarter-note beats from piece start
@@ -101,6 +104,13 @@ class NoteEvent:
     degree: int | None = None  # 1..7 within the bar's scale
     chord: str = ""            # roman-numeral symbol in context, e.g. "V7"
     role: str = ""             # "chord-tone" | "passing" | "root" | "approach" | ...
+    # --- tie flag (REFINEMENT_PLAN D1): "out" continues into the next
+    # same-layer same-pitch event whose start meets this end; "in" continues
+    # from one; "both" is an interior segment. A CHAIN of tied halves is one
+    # musical note that happens to cross barlines — each half stays grid- and
+    # bar-legal (the M8 invariant survives), and merge_ties() recovers the
+    # logical note for consumers that need it (MIDI, the melodic-line lints).
+    tie: str = ""
 
     def __post_init__(self) -> None:
         if self.layer not in LAYER_NAMES:
@@ -111,10 +121,44 @@ class NoteEvent:
             raise ValueError(f"velocity {self.velocity} out of range 1..127")
         if self.start < 0 or self.dur <= 0:
             raise ValueError(f"bad timing: start={self.start} dur={self.dur}")
+        if self.tie not in TIE_VALUES:
+            raise ValueError(f"tie must be one of {TIE_VALUES}, got {self.tie!r}")
 
     @property
     def end(self) -> float:
         return self.start + self.dur
+
+
+def merge_ties(events) -> list["NoteEvent"]:
+    """Collapse tie chains into logical notes: a chain — consecutive
+    same-layer same-pitch events whose ends meet the next start, flagged
+    out → (both …) → in — becomes one note with the head's start, velocity,
+    and annotations and the summed duration. Untied events pass through
+    UNCOPIED and in their given order (byte-identity for tie-free input);
+    an orphan "out" (a tie into a rest or an unhosted bar) dissolves into a
+    plain note, an orphan "in" passes through as struck (the linter flags
+    it). Input is expected in chronological emission order per layer, which
+    is how the conductor emits."""
+    from dataclasses import replace as _replace
+
+    out: list[NoteEvent] = []
+    open_chains: dict[tuple[str, int], NoteEvent] = {}
+    for ev in events:
+        key = (ev.layer, ev.pitch)
+        if ev.tie in ("in", "both"):
+            head = open_chains.get(key)
+            if head is not None and abs(head.end - ev.start) < 1e-9:
+                head.dur = round(head.dur + ev.dur, 10)
+                if ev.tie == "in":
+                    del open_chains[key]  # the chain closed
+                continue
+        if ev.tie in ("out", "both"):
+            head = _replace(ev, tie="")
+            open_chains[key] = head
+            out.append(head)
+        else:
+            out.append(ev)
+    return out
 
 
 @dataclass
@@ -140,10 +184,25 @@ class HarmonicContext:
     #                           dominant that verify._lint_obligations checks resolves to degree N
     phrase_pos: int = 0       # 0-based bar position within the phrase (REFINEMENT_PLAN A1:
     phrase_bars: int = 8      # phrase-aware modifiers like Perform read these)
+    # D3 intra-bar harmonic timeline: (beat offset within the bar, Chord)
+    # pairs; empty = one chord per bar (the `chord` field is always the
+    # downbeat alias). The prototype populates it only for the compressed
+    # cadential 6/4 (I64 -> V inside the pre-cadence bar); harmonic layers
+    # and the segment-aware lint rules consume it via chord_at().
+    chords: tuple = ()
     phrase_apex: int = -1     # bar-in-phrase of the planned melodic apex (-1 = unplanned; A4 —
     #                           Perform's hairpin crests here instead of at a fixed position)
     form: str = ""            # phrase-form annotation (B2): "" | "antecedent" | "consequent" —
     #                           verify.lint_periods re-derives the question/answer contract from it
+
+    def chord_at(self, beat_offset: float):
+        """The chord in force at a beat offset within the bar (D3): the last
+        timeline entry at or before the offset, else the downbeat chord."""
+        current = self.chord
+        for off, ch in self.chords:
+            if off <= beat_offset + 1e-9:
+                current = ch
+        return current
 
 
 @dataclass

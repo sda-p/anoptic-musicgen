@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-from musicgen.ir import GRID, HarmonicContext, Meter, NoteEvent
+from musicgen.ir import GRID, HarmonicContext, Meter, NoteEvent, merge_ties
 from musicgen.theory.counterpoint import (
     CONSONANT, forbidden_direct, forbidden_parallel, interval_class, motion,
 )
@@ -148,9 +148,14 @@ def _lint_pad(events, ctx_by_bar, meter, limits, stage, out) -> None:
                 out.append(Violation("pad-range", bar, f"{pitch_name(p)} outside pad range [{pitch_name(lo)}, {pitch_name(hi)}]"))
         ctx = ctx_by_bar.get(bar)
         if ctx is not None and ctx.chord_pcs:
+            pcs = ctx.chord_pcs
+            if ctx.chords:  # D3: membership against the segment in force
+                chord_now = ctx.chord_at(start - bar * meter.bar_quarters)
+                if chord_now is not None:
+                    pcs = chord_now.voiced_pcs(ctx.scale)
             for ev in groups[start]:
-                if ev.pitch % 12 not in ctx.chord_pcs and ev.role not in LICENSED_NONCHORD:
-                    out.append(Violation("chord-tone", bar, f"pad {pitch_name(ev.pitch)} is not a member of {ctx.chord_sym} (pcs {ctx.chord_pcs})"))
+                if ev.pitch % 12 not in pcs and ev.role not in LICENSED_NONCHORD:
+                    out.append(Violation("chord-tone", bar, f"pad {pitch_name(ev.pitch)} is not a member of {ctx.chord_sym} (pcs {pcs})"))
         # a lone pitch is a figure note (a C2 comping strike, an ornament's
         # resolution), not a voicing — voice-leading is judged between chords
         if (voicing_rules and prev_pitches is not None
@@ -243,6 +248,27 @@ def _lint_melody(events, ctx_by_bar, meter, limits, out) -> None:
             f"only {resolved}/{leaps} leaps beyond a P4 recover by an opposite step "
             f"({resolved / leaps:.2f} < {limits.leap_resolution_ratio})",
         ))
+
+
+def _lint_ties(events, meter, out) -> None:
+    """D1 tie coherence: an "in"/"both" event must continue a same-layer
+    same-pitch event that ends exactly at its start and ties out. An orphan
+    "out" is legal — a tie into a rest or an unhosted bar dissolves into a
+    plain note (merge_ties treats it so) — but an orphan "in" claims a
+    continuation that never sounded. Dormant on tie-free output."""
+    by_key: dict[tuple[str, int], list[NoteEvent]] = {}
+    for ev in events:
+        if ev.tie:
+            by_key.setdefault((ev.layer, ev.pitch), []).append(ev)
+    for (layer, pitch), evs in by_key.items():
+        evs.sort(key=lambda e: e.start)
+        for ev in evs:
+            if ev.tie in ("in", "both"):
+                if not any(o is not ev and o.tie in ("out", "both")
+                           and abs(o.end - ev.start) < 1e-9 for o in evs):
+                    out.append(Violation("tie", meter.bar_of(ev.start),
+                        f"{pitch_name(pitch)} ({layer}) ties in from nothing — no "
+                        f"same-pitch note ties out into its start"))
 
 
 def _lint_doubling(events, ctx_by_bar, meter, out) -> None:
@@ -387,10 +413,13 @@ def _lint_cadences(contexts, out) -> None:
             #           resolution is checked by the tonicize obligation instead
         table = CADENCE_DEGREES if ctx.cadence_slot == "cadence" else PRE_CADENCE_DEGREES
         allowed = table.get(ctx.cadence_policy)
-        if allowed and ctx.chord.degree not in allowed:
+        # a D3 split bar is judged by the segment APPROACHING the cadence —
+        # the harmony in force when the barline arrives
+        judged = ctx.chords[-1][1] if ctx.chords else ctx.chord
+        if allowed and judged.degree not in allowed:
             out.append(Violation(
                 "cadence", ctx.bar,
-                f"{ctx.cadence_slot} ({ctx.cadence_policy}) realized degree {ctx.chord.degree}, expected one of {allowed}",
+                f"{ctx.cadence_slot} ({ctx.cadence_policy}) realized degree {judged.degree}, expected one of {allowed}",
             ))
 
 
@@ -468,10 +497,13 @@ def _lint_obligations(events, ctx_by_bar, meter, out) -> None:
                 out.append(Violation("tonicize", bar,
                     f"secondary dominant {ctx.chord_sym or '(?)'} does not resolve to degree {target}"))
         elif ctx.obligation == "cadential64":
-            # B1: the 6/4 is a promise — a root-position dominant must follow
+            # B1: the 6/4 is a promise — a root-position dominant must follow;
+            # a D3 split bar may discharge it WITHIN the bar (the mid-pulse V)
+            in_bar = any(off > 0 and ch.degree == 5 and ch.inversion == 0
+                         for off, ch in ctx.chords)
             nxt = ctx_by_bar.get(bar + 1)
-            if (nxt is None or nxt.chord is None
-                    or nxt.chord.degree != 5 or nxt.chord.inversion != 0):
+            if not in_bar and (nxt is None or nxt.chord is None
+                               or nxt.chord.degree != 5 or nxt.chord.inversion != 0):
                 out.append(Violation("cadential64", bar,
                     f"cadential 6/4 {ctx.chord_sym or '(?)'} does not discharge onto "
                     f"a root-position V"))
@@ -605,6 +637,9 @@ def lint_outer(
     for ctx in contexts:
         if ctx.cadence_slot != "cadence":
             continue
+        if ctx.phrase_pos == 0:
+            continue  # an elided cadence (D2) is crashed into, not settled into —
+            #           the approach-contrary preference is about the settle
         # the cadence approach mixes yardsticks deliberately: the melody is the
         # SURFACE line (the ear tracks it — e.g. the post-apex descent), while
         # the bass is the ROOT motion downbeat-to-downbeat — its approach tone
@@ -679,9 +714,13 @@ def lint_texture(
     pad to dyads. Dormant when params carry no texture (pre-C4 "" state).
     Standalone like lint_groove; run on pre-modifier IR."""
     ctx_by_bar = {c.bar: c for c in contexts}
+    # phrase identity = rank of the phrase's start bar — division by
+    # phrase_bars breaks once the D2 clock schedules elastic segments
+    starts = sorted({bar - ctx.phrase_pos for bar, ctx in ctx_by_bar.items()})
+    rank = {s: i for i, s in enumerate(starts)}
     phrases: dict[int, list[int]] = {}
     for bar, ctx in ctx_by_bar.items():
-        phrases.setdefault((bar - ctx.phrase_pos) // max(1, ctx.phrase_bars), []).append(bar)
+        phrases.setdefault(rank[bar - ctx.phrase_pos], []).append(bar)
     by_bar: dict[int, list[NoteEvent]] = {}
     for ev in events:
         by_bar.setdefault(meter.bar_of(ev.start), []).append(ev)
@@ -695,6 +734,8 @@ def lint_texture(
         tex = texs.pop()
         if not tex:
             continue
+        if len(bars) < ctx_by_bar[bars[0]].phrase_bars:
+            continue  # the render truncated this phrase — its claim never got room
         evs = [e for b in bars for e in by_bar.get(b, [])]
         melody = [e for e in evs if e.layer == "melody" and e.role != DOUBLING_ROLE]
         doubles = [e for e in evs if e.role == DOUBLING_ROLE]
@@ -748,6 +789,8 @@ def lint_imitation(
     from musicgen.gen.motif import recognizability
 
     ctx_by_bar = {c.bar: c for c in contexts}
+    starts = sorted({bar - ctx.phrase_pos for bar, ctx in ctx_by_bar.items()})
+    rank = {s: i for i, s in enumerate(starts)}  # elastic-segment-safe (D2)
     by_phrase: dict[int, list[NoteEvent]] = {}
     for ev in events:
         if ev.role == IMITATION_ROLE and ev.layer in ("arp", "pad"):
@@ -755,8 +798,7 @@ def lint_imitation(
             ctx = ctx_by_bar.get(bar)
             if ctx is None:
                 continue
-            phrase = (bar - ctx.phrase_pos) // max(1, ctx.phrase_bars)
-            by_phrase.setdefault(phrase, []).append(ev)
+            by_phrase.setdefault(rank[bar - ctx.phrase_pos], []).append(ev)
 
     out: list[Violation] = []
     for phrase, entry in sorted(by_phrase.items()):
@@ -791,10 +833,14 @@ def lint(
     _lint_pad(events, ctx_by_bar, meter, limits, stage, out)
     _lint_bass(events, ctx_by_bar, meter, limits, out)
     if stage == "pre":  # slot-based melodic + obligation analysis assumes the unmodified grid
-        _lint_melody(events, ctx_by_bar, meter, limits, out)
+        # the melodic-line rules judge logical notes: a tie chain (D1) is one
+        # note whose onset is its head — a tied-into downbeat is not an
+        # attack, so it neither samples the strong-beat ratio nor fakes leaps
+        _lint_melody(merge_ties(events), ctx_by_bar, meter, limits, out)
         _lint_obligations(events, ctx_by_bar, meter, out)
         _lint_doubling(events, ctx_by_bar, meter, out)
         _lint_counter(events, ctx_by_bar, meter, limits, out)
+        _lint_ties(events, meter, out)
     _lint_perc(events, limits, meter, out)
     _lint_cadences(contexts, out)
     return out

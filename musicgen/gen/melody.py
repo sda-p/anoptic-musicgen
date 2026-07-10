@@ -19,7 +19,7 @@ tones are labeled "borrowed" for the linter and the dump.
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from musicgen.gen.motif import realize_cadential, realize_faithful
 from musicgen.gen.rhythm import rough_cell
@@ -83,6 +83,11 @@ class MelodyState:
     # (beat, melody pitch, bass pitch) at the last strong-slot melody onset —
     # the outer-voice pair the A3 guard continues from across the barline
     prev_outer: tuple[float, int, int] | None = None
+    # D1: a pitch tied out of the previous bar (anacrusis landing / pushed
+    # syncopation). The next bar HOSTS it — its downbeat onset becomes the
+    # tied continuation — or the tie dissolves into an orphan "out" (legal:
+    # merge_ties reads it as a plain note). Consumed every bar.
+    pending_tie: int | None = None
 
 
 def _contour_offsets(shape: str, n: int, span: int) -> tuple[int, ...]:
@@ -317,6 +322,63 @@ _snap_to_scale = snap_to_scale
 _diatonic_shift = diatonic_shift
 
 DOUBLING_VELOCITY = -8  # C1: the doubled line sits under the surface dynamically too
+PICKUP_VELOCITY = -8    # D1: the anacrusis leads in from under the line's dynamic
+
+
+def _anacrusis(events, new_state, ctx, meter, params, lo, hi, rng,
+               guard: "_OuterGuard | None") -> str:
+    """D1 pickups (REFINEMENT_PLAN): the cadence bar may exhale 1–3 pickup
+    8ths stepping toward the next bar's chord root/3rd — the goal tone known
+    from the lookahead — with the last tied over the barline when it lands on
+    the goal (a classic anticipation; MelodyState.pending_tie asks the next
+    bar to host it). The held cadence target is shortened to make room and
+    keeps at least a quarter note; the pickups occupy the space the Perform
+    luftpause would carve, so they ARE the breath. Mutates events/new_state
+    in place; returns a trace suffix ("" = stood down)."""
+    if not events or ctx.modulation or ctx.next_chord is None:
+        return ""
+    if rng.random() >= 0.2 + 0.6 * params.note_density:
+        return ""
+    n = rng.choices((1, 2, 3), weights=(0.4, 0.4, 0.2))[0]
+    eighth = 2 * GRID
+    bar_end = ctx.bar * meter.bar_quarters + meter.bar_quarters
+    target_ev = events[-1]  # the held cadence target (chronologically last)
+    while n and bar_end - n * eighth < target_ev.start + 1.0 - 1e-9:
+        n -= 1
+    if not n:
+        return ""
+    scale = ctx.scale
+    # the goal tone is the next chord's 3RD: the sweet imperfect consonance —
+    # landing on the root would hang an octave over the arriving bass, and
+    # the pickup before it would walk into afterbeat parallels
+    goal_pc = ctx.next_chord.pitch_classes(scale)[1]
+    land = _nearest_pc_pitch((goal_pc,), target_ev.pitch, lo, hi)
+    d = 1 if land >= target_ev.pitch else -1  # approach from the target's side
+    run = [_diatonic_shift(scale, land, -d * (n - i)) for i in range(n)] + [land]
+    run = run[1:]  # n pitches ending ON the goal
+    if any(not lo <= p <= hi for p in run) or abs(run[0] - target_ev.pitch) > 4:
+        return ""  # no room to connect stepwise — stand down
+    strong = set(meter.strong_slots())
+    if guard is not None:
+        # the one strong slot a pickup can occupy (n>=2) must hold the frame
+        for i, p in enumerate(run):
+            slot = meter.slots - 2 * (n - i)
+            if slot in strong and guard.recovery_collides(slot, p):
+                return ""
+    events[-1] = replace(target_ev, dur=round(bar_end - n * eighth - target_ev.start, 10))
+    for i, p in enumerate(run):
+        start = bar_end - (n - i) * eighth
+        events.append(NoteEvent(
+            start, eighth, p, _velocity(params, PICKUP_VELOCITY), "melody",
+            degree=scale.degree_of(p), chord=ctx.chord_sym, role="pickup",
+            tie="out" if i == n - 1 else ""))
+        if guard is not None and meter.slot_of(start) in strong:
+            guard.observe(meter.slot_of(start), p)
+    new_state.prev_pitch = land
+    new_state.pending_tie = land
+    if guard is not None:
+        new_state.prev_outer = guard.prev
+    return f" │ anacrusis {n} -> {pitch_name(land)}~"
 
 
 def _double_line(events: list[NoteEvent], ctx: HarmonicContext, meter: Meter) -> list[NoteEvent]:
@@ -358,7 +420,7 @@ def _velocity(params: MusicalParams, emphasis: int = 0) -> int:
 
 
 def _place(cell, ctx, mscale, params, state, lo, hi, strong, peak: int | None = None,
-           guard: _OuterGuard | None = None):
+           guard: _OuterGuard | None = None, pin_first: int | None = None):
     """Constraint-first placement of a rhythm+contour cell: strong beats snap to
     chord tones, weak beats step, leaps recover, the register folds toward center.
     Returns (placed, anchor). This is the disposable/disguised realization —
@@ -366,7 +428,12 @@ def _place(cell, ctx, mscale, params, state, lo, hi, strong, peak: int | None = 
     the cell's highest contour note is lifted to the nearest chord tone of the
     planned apex; a leap into it recovers by the standard opposite step — gap-fill.
     With `guard` (A3), strong-slot chord-tone picks avoid consecutive/direct
-    perfects against the realized bass, and every strong onset updates the pair."""
+    perfects against the realized bass, and every strong onset updates the pair.
+    With `pin_first` (D1), a downbeat-opening cell's first note IS that pitch —
+    the continuation of a note tied over the barline. Pinning here (not
+    overriding after the fact) keeps the leap-recovery chain and the guard's
+    pair bookkeeping consistent with what actually sounds: the previous pitch
+    is the tied note itself, so the entry is oblique by construction."""
     anchor_target = state.prev_pitch if state.prev_pitch is not None else params.register_center
     anchor_target = min(max(anchor_target, lo + 3), hi - 3)
     anchor = _nearest_pc_pitch(ctx.chord_pcs, anchor_target, lo, hi)
@@ -385,12 +452,19 @@ def _place(cell, ctx, mscale, params, state, lo, hi, strong, peak: int | None = 
         return _nearest_pc_pitch(ctx.chord_pcs, target, lo, hi)
 
     for i, ((slot, dur_slots), offset) in enumerate(zip(cell.rhythm, cell.contour)):
-        if i == peak_i and not (recovery and prev is not None):
+        if i == 0 and slot == 0 and pin_first is not None:
+            pitch = pin_first  # the tied continuation — given, not chosen
+        elif i == peak_i and not (recovery and prev is not None):
             pitch = snap(peak, slot)
         elif recovery and prev is not None:
             # A leap must resolve by an opposite step — even on a strong slot
             # (an appoggiatura-style resolution; the ratio rule has slack).
-            pitch = _diatonic_shift(mscale, prev, recovery)
+            # From a CHROMATIC pitch (an applied chord's tone) diatonic_shift
+            # would snap first and overshoot the step — take a true one
+            pitch = next((prev + recovery * k for k in (1, 2)
+                          if mscale.contains(prev + recovery * k)
+                          or (prev + recovery * k) % 12 in ctx.chord_pcs),
+                         _diatonic_shift(mscale, prev, recovery))
         else:
             target = _diatonic_shift(mscale, anchor, offset)
             if slot in strong:
@@ -427,7 +501,15 @@ def _place(cell, ctx, mscale, params, state, lo, hi, strong, peak: int | None = 
         if i == last_index and prev is not None and abs(pitch - prev) > 5:
             # Bars never end mid-leap: the next bar's recovery cannot be
             # guaranteed (anchors move), so contract the final leap to a step.
-            pitch = _diatonic_shift(mscale, prev, 1 if pitch > prev else -1)
+            # The contraction replaces a GUARDED pick — on a strong slot it
+            # must hold the frame too, else it steps the other way.
+            contracted = _diatonic_shift(mscale, prev, 1 if pitch > prev else -1)
+            if (guard is not None and slot in strong
+                    and guard.recovery_collides(slot, contracted)):
+                other = _diatonic_shift(mscale, prev, -1 if pitch > prev else 1)
+                if not guard.recovery_collides(slot, other):
+                    contracted = other
+            pitch = contracted
         interval = 0 if prev is None else pitch - prev
         recovery = 0 if abs(interval) <= 5 else (-1 if interval > 0 else 1)
         placed.append((slot, dur_slots, pitch))
@@ -438,13 +520,16 @@ def _place(cell, ctx, mscale, params, state, lo, hi, strong, peak: int | None = 
 
 
 def _introduce(motif, ctx, mscale, params, state, lo, hi, strong,
-               guard: _OuterGuard | None = None):
+               guard: _OuterGuard | None = None, pin_first: int | None = None):
     """Fragmentary introduction (§5.5, M15): a truncated cell that ends on an
     unstable degree (2̂ or 7̂) — the motif glimpsed and left hanging, so the later
     completed statement reads as an arrival. Realized in disguise (constraint-first)."""
     k = max(1, (len(motif.rhythm) + 1) // 2)  # the first half — a fragment
     frag = Motif(motif.rhythm[:k], motif.contour[:k], motif.shape)
-    placed, anchor = _place(frag, ctx, mscale, params, state, lo, hi, strong, guard=guard)
+    placed, anchor = _place(frag, ctx, mscale, params, state, lo, hi, strong, guard=guard,
+                            pin_first=pin_first)
+    if len(placed) == 1 and placed[0][0] == 0 and pin_first is not None:
+        return placed, anchor, "introduced"  # the tied continuation is not nudgeable
     if placed:  # nudge the final note to the nearest 2̂/7̂ — the unresolved, hanging tail
         slot, dur, last = placed[-1]
         prev = placed[-2][2] if len(placed) > 1 else \
@@ -494,6 +579,8 @@ def generate_melody(
     replay: tuple[tuple[int, int, int], ...] | None = None,
     double: bool = False,
     prev_bass: int | None = None,
+    anacrusis_rng: random.Random | None = None,
+    syncopate_rng: random.Random | None = None,
 ) -> tuple[list[NoteEvent], MelodyState, str]:
     """One bar of melody. `lifecycle` stages the persistent `signature` (M15/M17)
     *positionally* within the phrase — the phrase keeps its own disposable `motif`,
@@ -535,6 +622,9 @@ def generate_melody(
             _cadence_statement(sig, ctx, meter, params, state, lo, hi)
             if lifecycle == "completed"
             else _cadence_bar(ctx, meter, params, state, lo, hi, rng, guard))
+        if anacrusis_rng is not None and lifecycle != "completed":
+            trace += _anacrusis(events, new_state, ctx, meter, params, lo, hi,
+                                anacrusis_rng, guard)
         if double and events:
             dbl = _double_line(events, ctx, meter)
             events += dbl
@@ -544,7 +634,12 @@ def generate_melody(
     rest_prob = max(0.0, cfg.bar_rest_max - params.note_density * 0.4)
     if (lifecycle != "completed" and not sig_event and not apex_bar and pos.slot == "free"
             and rng.random() < rest_prob):
-        return [], state, "melody: rest bar"  # signature events, the payoff drive, and the apex never rest
+        # signature events, the payoff drive, and the apex never rest. A
+        # pending tie dissolves here (orphan "out" = plain note), so the
+        # returned state consumes it.
+        rested = MelodyState(prev_pitch=state.prev_pitch, prev_anchor=state.prev_anchor,
+                             prev_outer=state.prev_outer)
+        return [], rested, "melody: rest bar"
 
     mscale = ctx.chord.scale_for(ctx.scale) if ctx.chord else ctx.scale
     strong = set(meter.strong_slots())
@@ -593,6 +688,25 @@ def generate_melody(
                     if slot in strong:
                         guard.observe(slot, p)
 
+    # D1: a pending tie is hosted by PINNING the downbeat pick inside _place —
+    # the whole chain (contour, leap recovery, guard pairs) then builds from
+    # the note that actually sounds. Faithful statements and verbatim replays
+    # keep their identity; an unhosted tie dissolves into a legal orphan.
+    # The pin is judged like any downbeat arrival: the sustained tone's true
+    # attack sits on a weak slot the frame sampler never sees, so a pin that
+    # would land afterbeat perfects against the last strong pair stands down.
+    pin0 = None
+    if state.pending_tie is not None and lo <= state.pending_tie <= hi:
+        pin0 = state.pending_tie
+        if guard is not None:
+            t0 = ctx.bar * meter.bar_quarters
+            bass_now, pair = guard.bass_at(t0), guard._pair(t0)
+            if bass_now is not None and pair is not None:
+                prev_m, prev_b = pair
+                if (forbidden_parallel(prev_b, prev_m, bass_now, pin0)
+                        or forbidden_direct(prev_b, prev_m, bass_now, pin0)):
+                    pin0 = None
+
     if replayed:
         pass
     elif lifecycle == "completed":
@@ -601,15 +715,15 @@ def generate_melody(
         # statement lands as the destination, not as the seventh repetition.
         variant, base_op = phrase_variant(sig, pos.pos, rng, meter.slots)
         placed, anchor = _place(variant, ctx, mscale, params, state, lo, hi, strong,
-                                guard=guard)
+                                guard=guard, pin_first=pin0)
         op, shape = f"drive {base_op}", sig.shape
     elif sig_event and lifecycle == "introduced":
         placed, anchor, op = _introduce(sig, ctx, mscale, params, state, lo, hi, strong,
-                                        guard=guard)
+                                        guard=guard, pin_first=pin0)
         shape = sig.shape
     elif sig_event and lifecycle == "developed":
         placed, anchor = _place(sig, ctx, mscale, params, state, lo, hi, strong,
-                                guard=guard)
+                                guard=guard, pin_first=pin0)
         op, shape = "signature disguised", sig.shape
     elif sig_event:  # "stated": the faithful recurrence of an authored signature (M17)
         placed = realize_faithful(sig, mscale, ctx.chord_pcs, lo, hi, strong, near=state.prev_pitch)
@@ -618,10 +732,28 @@ def generate_melody(
     else:
         variant, op = phrase_variant(motif, pos.pos, rng, meter.slots)
         placed, anchor = _place(variant, ctx, mscale, params, state, lo, hi, strong,
-                                peak=apex.pitch if apex_bar else None, guard=guard)
+                                peak=apex.pitch if apex_bar else None, guard=guard,
+                                pin_first=pin0)
         if apex_bar:
             op += "+apex"
         shape = motif.shape
+
+    # D1 tie bookkeeping: flag the hosted continuation, then maybe push THIS
+    # bar's last note through the barline when the rhythm is rough enough.
+    ties = [""] * len(placed)
+    tied = ""
+    if (pin0 is not None and placed and not faithful and not replayed
+            and placed[0][0] == 0 and placed[0][2] == pin0):
+        ties[0] = "in"
+        tied = " │ ~tied in"
+    pending_out: int | None = None
+    if (syncopate_rng is not None and placed and not faithful
+            and params.roughness > 0.35
+            and placed[-1][0] + placed[-1][1] == meter.slots
+            and syncopate_rng.random() < params.roughness - 0.3):
+        ties[-1] = "both" if ties[-1] == "in" else "out"
+        pending_out = placed[-1][2]
+        tied += " │ pushed through the barline~"
 
     bar_start = ctx.bar * meter.bar_quarters
     events: list[NoteEvent] = []
@@ -642,6 +774,7 @@ def generate_melody(
         events.append(NoteEvent(
             bar_start + slot * GRID, dur_slots * GRID, pitch, _velocity(params),
             "melody", degree=ctx.scale.degree_of(pitch), chord=ctx.chord_sym, role=role,
+            tie=ties[i],
         ))
 
     doubled = ""
@@ -652,8 +785,10 @@ def generate_melody(
 
     new_state = MelodyState(prev_pitch=placed[-1][2] if placed else state.prev_pitch,
                             prev_anchor=anchor,
-                            prev_outer=guard.prev if guard is not None else state.prev_outer)
-    return events, new_state, f"melody: {op} ({shape}) anchor {pitch_name(anchor)} n={len(placed)}{doubled}"
+                            prev_outer=guard.prev if guard is not None else state.prev_outer,
+                            pending_tie=pending_out)
+    return events, new_state, (f"melody: {op} ({shape}) anchor {pitch_name(anchor)} "
+                               f"n={len(placed)}{tied}{doubled}")
 
 
 def _cadence_target_pcs(ctx: HarmonicContext) -> tuple[int, ...]:

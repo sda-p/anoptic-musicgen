@@ -52,9 +52,9 @@ these waves start from a clean baseline.
 | C3 | Imitation ✚ *(done)* | M | ★★★★ | A3 | no |
 | C4 | Texture as a Tier-2 parameter ✚ *(done)* | S–M | ★★★★ | ≥2 of C1–C3 | param set → spec |
 | C5 | Countermelody + guide-tone lines ✚ *(done)* | L | ★★★★★ | A3, C4 | **yes** (new layer) |
-| D1 | `tie` flag: anacrusis, cross-bar suspensions | L | ★★★★ | — | **yes** (IR) |
-| D2 | PhraseClock: codetta / extension / elision | L | ★★★★ | B2 | **yes** (loop contract) |
-| D3 | Intra-bar harmonic rhythm (2 chords/bar) | XL | ★★★ | — | **yes** (context shape) |
+| D1 | `tie` flag: anacrusis, cross-bar suspensions ✚ *(done)* | L | ★★★★ | — | **yes** (IR) |
+| D2 | PhraseClock: codetta / extension / elision ✚ *(done)* | L | ★★★★ | B2 | **yes** (loop contract) |
+| D3 | Intra-bar harmonic rhythm (2 chords/bar) ✚ *(done: prototype + decision)* | XL | ★★★ | — | **yes** (context shape) |
 
 Improvements.md's own "prototype these first" pick — phrasing, periods,
 countermelody — maps to A1, B2, C5: first, sixth, and the polyphony capstone. The
@@ -442,7 +442,7 @@ These three are the expensive ones, but they are precisely the items that decide
 what the C engine's event format, per-bar context, and pull-loop contract look
 like. Landing them here means the spec is written from experience, not prediction.
 
-### D1. `tie` flag on NoteEvent — anacrusis, cross-bar suspensions, cross-bar syncopation
+### D1. `tie` flag on NoteEvent — anacrusis, cross-bar suspensions, cross-bar syncopation ✚ *(done; PLANS.md M25)*
 
 **Payoff ★★★★ / Complexity L.** M8's "raw events never cross barlines" invariant
 quietly forbids the pickup and the tied suspension — the two most human gestures
@@ -484,7 +484,7 @@ stay grid- and bar-legal).
 **DoD.** Byte-identical with no ties emitted; round-trip clean; all 272+ tests
 pass; the "phrase starts are bar-aligned" tell is audibly gone in the A/B.
 
-### D2. PhraseClock — codetta, extension, elision
+### D2. PhraseClock — codetta, extension, elision ✚ *(done; PLANS.md M26)*
 
 **Payoff ★★★★ / Complexity L.** Everything is 4 or 8 bars today because
 `phrase_position()` is a pure div/mod. Humans elide, extend, and append codettas;
@@ -516,7 +516,7 @@ the dramaturg is the natural author of all three.
 demoed; lint clean across seeds × meters; the ledger's monotone-payoff property
 still holds with elastic phrases (re-run `demo_payoff` acceptance).
 
-### D3. Intra-bar harmonic rhythm (2 chords/bar)
+### D3. Intra-bar harmonic rhythm (2 chords/bar) ✚ *(done: prototype + decision record; PLANS.md M27)*
 
 **Payoff ★★★ / Complexity XL.** The `harmonic_rhythm=2` cell of the §6.2 table
 that never landed, and the *true* form of cadence-approach acceleration (B1's
@@ -537,6 +537,30 @@ so").
 - Recommendation: prototype on the pre-cadence bar *only* (the musical payoff
   concentrates there), measure whether general 2/bar earns its complexity, then
   write the spec from the result.
+
+**Decision record (M27).** The prototype (`FormConfig.split_64`) compresses
+the cadential 6/4 into the pre-cadence bar: `HarmonicContext.chords` carries
+an intra-bar timeline `((0.0, I64), (bar/2, V))` with `chord` kept as the
+downbeat alias and `chord_at(offset)` resolving the segment in force. The pad
+re-voices at the pulse (voice-led halves); the bass needed **nothing** — the
+shared dominant pitch class pervades both chords, which is the classical
+genius of the 6/4; melody/arp/counter deliberately keep the downbeat chord,
+whose tones over the V half ARE the 4–3/6–5 suspension complex the style
+wants. Lint went segment-aware in exactly three places (pad membership, the
+cadence-slot judgment, the in-bar 6/4 discharge), each plant-tested.
+Measurement: 187 split bars across the 120-config full-stack sweep, zero
+violations; the compressed form displaces the three-bar formula at
+energy ≥ 0.6 and hands the bars−3 slot back to the free walk.
+
+**The C-spec answer: one chord per bar stays the per-bar context's primary
+shape.** The event format does not change; the context gains ONE optional
+field (the timeline) consumed by voice-led harmonic layers and the linter
+only. Generalizing to arbitrary 2/bar would mean per-segment chord membership
+in every melodic generator, segmented voice-leading memory, and windowed
+versions of every chord rule — a rewrite priced against audible gain that the
+prototype shows is confined to the cadence approach, which the timeline
+already covers. Acceleration elsewhere remains B1's three-bar formula plus
+this compression.
 
 ---
 
@@ -577,12 +601,20 @@ game side as planned.
 
 ## What must land before the C-engine spec freezes
 
-The spec's IR chapter needs **D1** (tie semantics), **C5** (final layer set —
+The spec's IR chapter needs **D1** (tie semantics — ✚ *done*: the tie flag,
+merge semantics, and the modifier/writer contracts), **C5** (final layer set —
 ✚ *done*: six layers, "counter" landed with M24), **C4** (final Tier-2
 parameter list — ✚ *done*: `texture` joined MusicalParams), and **D2** (whether
-phrase length is a constant or a scheduled clock — this changes the engine's
-phrase API). **D3** needs at least its decision record. **A3 + C5's linter
-rules** are the acceptance suite §13.3 promises the native implementation —
-both landed (`lint_outer`, `_lint_counter`). Everything else (A1's constants,
+phrase length is a constant or a scheduled clock — ✚ *done*: a scheduled
+`PhraseClock` of (start, bars, kind) segments; the engine's phrase API is
+`position(bar)`). **D3**'s decision record is written (one chord per bar plus
+an optional intra-bar timeline; see §D3). **A3 + C5's linter rules** are the
+acceptance suite §13.3 promises the native implementation — both landed
+(`lint_outer`, `_lint_counter`).
+
+**The backlog is complete.** Every item A1–D3 has landed as PLANS.md
+M19–M27, each config-gated with a byte-identical-off default, linted with
+poisoned plants, playground-tunable, and swept clean with the entire stack
+enabled. The C-engine spec can freeze over a finished IR and rule set. Everything else (A1's constants,
 B-wave heuristics) ports as tuning, not architecture — it can keep evolving in the
 prototype after the spec drafts.

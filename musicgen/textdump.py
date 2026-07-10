@@ -27,9 +27,13 @@ def dur_symbol(dur: float) -> str:
 def _event_line(ev: NoteEvent, meter: Meter) -> str:
     degree = f"^{ev.degree}" if ev.degree else "-"
     name = "-" if ev.layer == "perc" else pitch_name(ev.pitch)
+    if ev.tie in ("in", "both"):  # a continuation: ~D5; a note tying on: D5~
+        name = f"~{name}"
+    if ev.tie in ("out", "both"):
+        name = f"{name}~"
     return (
         f"{meter.beat_in_bar(ev.start):>5.2f} {dur_symbol(ev.dur):<3} "
-        f"{name:<4} {degree:<3} {ev.role or '-':<10} v{ev.velocity}"
+        f"{name:<6} {degree:<3} {ev.role or '-':<10} v{ev.velocity}"
     )
 
 

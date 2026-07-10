@@ -53,12 +53,17 @@ def schedule_bar(result, clock: BeatClock, seq_start: int = 0, bar_quarters: flo
         spec = LAYER_MIDI[ev.layer]
         on_t = clock.time_at(ev.start)
         off_t = max(clock.time_at(ev.end), on_t + 0.02)
-        entries.append(_Entry(on_t, 1, seq, "midi",
-                              mido.Message("note_on", channel=spec.channel, note=ev.pitch, velocity=ev.velocity)))
-        seq += 1
-        entries.append(_Entry(off_t, 0, seq, "midi",
-                              mido.Message("note_off", channel=spec.channel, note=ev.pitch, velocity=0)))
-        seq += 1
+        # tie chains (D1) are MIDI-natural live: suppress the note_on of a
+        # continuation and the note_off of a half that ties onward — the
+        # device holds one note across the join
+        if ev.tie not in ("in", "both"):
+            entries.append(_Entry(on_t, 1, seq, "midi",
+                                  mido.Message("note_on", channel=spec.channel, note=ev.pitch, velocity=ev.velocity)))
+            seq += 1
+        if ev.tie not in ("out", "both"):
+            entries.append(_Entry(off_t, 0, seq, "midi",
+                                  mido.Message("note_off", channel=spec.channel, note=ev.pitch, velocity=0)))
+            seq += 1
     return entries
 
 

@@ -29,7 +29,9 @@ from statistics import mean
 from common import emit, standard_args
 
 from musicgen.control.mapping import MappingTable
-from musicgen.gen.conductor import EngineConfig, FormConfig, MusicEngine, TextureConfig
+from musicgen.gen.conductor import (
+    ClockConfig, EngineConfig, FormConfig, MusicEngine, TextureConfig, TieConfig,
+)
 from musicgen.gen.melody import MelodyConfig
 from musicgen.modifiers import default_chains
 from musicgen.verify import lint_groove, lint_imitation, lint_outer, lint_periods
@@ -44,9 +46,12 @@ VARIANTS = (
                   phrase_groove=True,
                   melody=MelodyConfig(plan_apex=True, counterpoint=True),
                   form=FormConfig(cadential_64=True, periods=True,
-                                  hypermeter=True, bass_inversions=True),
+                                  hypermeter=True, bass_inversions=True,
+                                  split_64=True),
                   texture=TextureConfig(doubling=True, animate=True,
-                                        imitation=True, counter=True))),
+                                        imitation=True, counter=True),
+                  ties=TieConfig(anacrusis=True, suspension=True, syncopation=True),
+                  clock=ClockConfig(codetta=True, extension=True, elision=True))),
 )
 
 
@@ -55,7 +60,7 @@ def main() -> None:
     parser.add_argument("--bars", type=int, default=24)
     args = parser.parse_args()
 
-    print(f"waves A+B+C A/B │ seed {args.seed} │ affect {AFFECT}\n")
+    print(f"waves A-D A/B │ seed {args.seed} │ affect {AFFECT}\n")
     baseline_raw = None
     for name, cfg in VARIANTS:
         engine = MusicEngine(seed=args.seed,
@@ -93,12 +98,16 @@ def main() -> None:
             entries = len(engine.state.imitation_cells)
             animated = sum(1 for r in results for line in r.trace if "animate:" in line)
             counters = sum(1 for e in raw if e.layer == "counter")
+            ties = sum(1 for e in raw if e.tie)
+            elastic = [s.kind for s in engine.state.clock.segments if s.kind]
             extra = (f"\n  {'':<10} groove+period+imitation contracts "
                      f"{'CLEAN' if not contract else f'{len(contract)} VIOLATIONS'}"
                      f" │ periods {periods} │ cadential 6/4s {cad64}"
                      f" │ bass inversions {inversions}"
                      f"\n  {'':<10} doubles {doubles} │ imitation entries {entries}"
                      f" │ animated pad bars {animated} │ counter notes {counters}"
+                     f"\n  {'':<10} tied events {ties} │ split 6/4s {len(engine.state.splits)}"
+                     f" │ elastic segments {elastic or 'none'}"
                      f"\n  {'':<10} apex plans (phrase:bar@pitch) {apexes}")
         print(f"  {name:<10} melody velocity by phrase bar │ {curve} │ rits {rits} "
               f"│ outer-voice violations {len(outer)}{extra}")

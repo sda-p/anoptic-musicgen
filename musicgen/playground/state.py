@@ -16,25 +16,33 @@ from pathlib import Path
 from musicgen.control.automation import affect_at
 from musicgen.control.levers import validate_override
 from musicgen.control.mapping import MappingTable
-from musicgen.gen.conductor import EngineConfig, FormConfig, MusicEngine, TextureConfig
+from musicgen.gen.conductor import (
+    ClockConfig, EngineConfig, FormConfig, MusicEngine, TextureConfig, TieConfig,
+)
 from musicgen.gen.dramaturg import DramaturgConfig
 from musicgen.gen.melody import MelodyConfig
 from musicgen.modifiers import default_chains
 from musicgen.playground.telemetry import to_jsonable
 
-# the refinement mirror (REFINEMENT_PLAN waves A+B+C: A1 shaping+rit, A2 groove,
+# the refinement mirror (REFINEMENT_PLAN waves A–D: A1 shaping+rit, A2 groove,
 # A3 counterpoint, A4 apex; B1 cadential 6/4, B2 periods, B3 hypermeter,
-# B4 bass inversions + lament; C1 doubling, C2 pad animation, C3 imitation):
-# all off by default = byte-identical output; the panel toggles them live.
-# cadence_rit is the depth the rit knob applies WHEN shaping is on (shaping
-# off forces it to 0).
+# B4 bass inversions + lament; C1 doubling, C2 pad animation, C3 imitation,
+# C4 texture rotation, C5 countermelody; D1 ties — anacrusis, held
+# suspensions, syncopation; D2 elastic clock — codetta, extension, elision;
+# D3 split 6/4): all off by default = byte-identical output; the panel
+# toggles them live. cadence_rit is the depth the rit knob applies WHEN
+# shaping is on (shaping off forces it to 0).
 _PERFORM_DEFAULTS = {"shaping": False, "cadence_rit": 0.025,
                      "phrase_groove": False, "plan_apex": False,
                      "counterpoint": False, "cadential_64": False,
                      "periods": False, "hypermeter": False,
                      "bass_inversions": False, "doubling": False,
                      "animate": False, "imitation": False,
-                     "rotate": False, "counter": False}
+                     "rotate": False, "counter": False,
+                     "anacrusis": False, "tie_suspension": False,
+                     "syncopation": False, "codetta": False,
+                     "extension": False, "elision": False,
+                     "split_64": False}
 _PERFORM_FLOATS = {"cadence_rit"}
 
 # a tighter look-ahead than the demos: generation is µs-fast, so a small buffer
@@ -118,12 +126,19 @@ class PlaygroundState:
                            form=FormConfig(cadential_64=bool(p["cadential_64"]),
                                            periods=bool(p["periods"]),
                                            hypermeter=bool(p["hypermeter"]),
-                                           bass_inversions=bool(p["bass_inversions"])),
+                                           bass_inversions=bool(p["bass_inversions"]),
+                                           split_64=bool(p["split_64"])),
                            texture=TextureConfig(doubling=bool(p["doubling"]),
                                                  animate=bool(p["animate"]),
                                                  imitation=bool(p["imitation"]),
                                                  rotate=bool(p["rotate"]),
-                                                 counter=bool(p["counter"])))
+                                                 counter=bool(p["counter"])),
+                           ties=TieConfig(anacrusis=bool(p["anacrusis"]),
+                                          suspension=bool(p["tie_suspension"]),
+                                          syncopation=bool(p["syncopation"])),
+                           clock=ClockConfig(codetta=bool(p["codetta"]),
+                                             extension=bool(p["extension"]),
+                                             elision=bool(p["elision"])))
         engine = MusicEngine(seed=self.seed, config=cfg)
         for name, value in self.pinned.items():
             engine.set_override(name, value)

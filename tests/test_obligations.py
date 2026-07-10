@@ -136,23 +136,19 @@ def test_no_obligations_is_silent():
 
 # --- pad realization: a prepared voice becomes a resolving suspension (M14.2) --
 
-def _I():
-    return HarmonicContext(bar=1, scale=SCALE, chord=Chord(1), chord_sym="I", chord_pcs=(0, 4, 7))
-
-
 def test_suspension_pair_finds_highest_prepared_step():
     # over I(C E G): D(62) still sounding is a 9–8 suspension resolving to C(60);
     # A(57) is a prepared 6–5 over G — the higher dissonance (D) wins.
-    assert _suspension_pair((55, 60, 64, 67), (57, 62, 64, 67), _I()) == (60, 62)
+    assert _suspension_pair((55, 60, 64, 67), (57, 62, 64, 67), {0, 4, 7}, SCALE) == (60, 62)
 
 
 def test_suspension_pair_requires_preparation():
-    assert _suspension_pair((55, 60, 64, 67), (55, 60, 64, 67), _I()) is None  # nothing held over
+    assert _suspension_pair((55, 60, 64, 67), (55, 60, 64, 67), {0, 4, 7}, SCALE) is None
 
 
 def test_suspension_pair_rejects_chromatic():
     # C#(61) is a step above C(60) but not diatonic — a suspension must be clean.
-    assert _suspension_pair((55, 60, 64, 67), (55, 61, 64, 67), _I()) is None
+    assert _suspension_pair((55, 60, 64, 67), (55, 61, 64, 67), {0, 4, 7}, SCALE) is None
 
 
 # --- the dramaturg deploys suspensions over the cadences it controls ----------
