@@ -161,9 +161,12 @@ class Echo:
 
     def apply(self, events, ctx, meter, params, rng) -> list[NoteEvent]:
         out = list(events)
-        # An echo landing exactly on a same-pitch note is masked by it — and
-        # MIDI cannot represent two coincident same-pitch notes distinctly.
-        occupied = {(round(ev.start, 6), ev.pitch) for ev in events}
+        # An echo overlapping a same-pitch note is masked by it — and MIDI
+        # cannot represent two overlapping same-pitch notes on one channel
+        # (the off of one closes the other). Long notes made this real (C3
+        # imitation entries in the arp register), so the mask covers spans,
+        # not just coincident starts.
+        spans = [(ev.start, ev.end, ev.pitch) for ev in events]
         for ev in events:
             velocity = float(ev.velocity)
             for k in range(1, self.repeats + 1):
@@ -171,13 +174,15 @@ class Echo:
                 if velocity < self.min_velocity:
                     break
                 start = round(ev.start + k * self.delay, 6)
-                if (start, ev.pitch) in occupied:
+                dur = min(ev.dur, self.delay * 0.9)
+                if any(p == ev.pitch and start < e - 1e-9 and s - 1e-9 < start + dur
+                       for s, e, p in spans):
                     continue
-                occupied.add((start, ev.pitch))
+                spans.append((start, start + dur, ev.pitch))
                 out.append(replace(
                     ev,
                     start=start,
-                    dur=min(ev.dur, self.delay * 0.9),
+                    dur=dur,
                     velocity=_clamp_velocity(velocity),
                     role="echo",
                 ))
@@ -247,6 +252,7 @@ def default_chains(perform: bool = False) -> dict[str, tuple]:
             "pad": (Strum(), Humanize(t_sigma=0.010, v_sigma=3.0)),
             "bass": (Humanize(t_sigma=0.008, v_sigma=3.0),),
             "melody": (Articulate(), Accent(), Humanize()),
+            "counter": (Articulate(), Accent(), Humanize()),
             "arp": (Echo(),),
             "perc": (Humanize(t_sigma=0.006, v_sigma=3.0),),
         }
@@ -255,6 +261,10 @@ def default_chains(perform: bool = False) -> dict[str, tuple]:
         "bass": (Perform(hairpin=0.10), Humanize(t_sigma=0.008, v_sigma=3.0)),
         "melody": (Articulate(), Accent(),
                    Perform(hairpin=0.14, contour=0.4, agogic=0.10, lag=0.02), Humanize()),
+        # a real line, shaped like one — but subordinate: shallower hairpin,
+        # no agogic (the melody owns the phrase's breath)
+        "counter": (Articulate(), Accent(),
+                    Perform(hairpin=0.12, contour=0.3, lag=0.01), Humanize()),
         "arp": (Perform(hairpin=0.10), Echo()),
         "perc": (Humanize(t_sigma=0.006, v_sigma=3.0),),
     }

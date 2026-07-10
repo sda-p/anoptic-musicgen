@@ -163,20 +163,28 @@ def bass_voice(freq: float, amp: float, dur: float, cutoff, variant: str = "roun
 
 def lead_voice(freq: float, amp: float, dur: float, cutoff, variant: str = "soft") -> tuple[object, float]:
     """Triangle/saw blend with delayed vibrato. "hard": saw/square stack,
-    earlier and deeper vibrato, snappier attack, hotter resonant filter."""
+    earlier and deeper vibrato, snappier attack, hotter resonant filter.
+    "mellow" (the C5 countermelody): triangle-dominant with a sine sub, later
+    and shallower vibrato, slower attack, darker filter — and panned opposite
+    the melody, so the two lines separate spatially."""
     hard = variant == "hard"
-    vibrato = 1.0 + sf.SineOscillator(6.2 if hard else 5.5) * (
-        sf.Line(0.0, 1.0, 0.15 if hard else 0.35) * (0.009 if hard else 0.006))
+    mellow = variant == "mellow"
+    vibrato = 1.0 + sf.SineOscillator(6.2 if hard else 4.8 if mellow else 5.5) * (
+        sf.Line(0.0, 1.0, 0.15 if hard else 0.5 if mellow else 0.35)
+        * (0.009 if hard else 0.004 if mellow else 0.006))
     if hard:
         osc = sf.SawOscillator(freq * vibrato) * 0.6 + sf.SquareOscillator(freq * vibrato) * 0.3
+    elif mellow:
+        osc = sf.TriangleOscillator(freq * vibrato) * 0.8 + sf.SineOscillator(freq * vibrato) * 0.2
     else:
         osc = sf.TriangleOscillator(freq * vibrato) * 0.7 + sf.SawOscillator(freq * vibrato) * 0.25
-    attack = 0.006 if hard else 0.02
-    env = sf.ASREnvelope(attack, max(dur - attack, 0.03), 0.18, curve=1.8)
+    attack = 0.006 if hard else 0.035 if mellow else 0.02
+    env = sf.ASREnvelope(attack, max(dur - attack, 0.03), 0.22 if mellow else 0.18, curve=1.8)
     filt = sf.SVFilter(osc, "low_pass",
-                       cutoff=cutoff * (1.4 if hard else 1.0) * _keytrack(freq, 0.4),
+                       cutoff=cutoff * (1.4 if hard else 0.8 if mellow else 1.0)
+                       * _keytrack(freq, 0.4),
                        resonance=0.2 if hard else 0.1)
-    return sf.StereoPanner(filt * env * amp, 0.12), dur + 0.18
+    return sf.StereoPanner(filt * env * amp, -0.14 if mellow else 0.12), dur + 0.18
 
 
 def arp_voice(freq: float, amp: float, dur: float, variant: str = "pluck") -> tuple[object, float]:

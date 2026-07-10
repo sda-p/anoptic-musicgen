@@ -19,7 +19,7 @@ from typing import Sequence
 
 from musicgen.ir import GRID, HarmonicContext, Meter, NoteEvent
 from musicgen.theory.counterpoint import (
-    forbidden_direct, forbidden_parallel, interval_class, motion,
+    CONSONANT, forbidden_direct, forbidden_parallel, interval_class, motion,
 )
 from musicgen.theory.pitch import pitch_name
 
@@ -27,12 +27,21 @@ from musicgen.theory.pitch import pitch_name
 # repeats bleeding into the next bar's harmony (reverb-like, not a wrong note).
 # "motif" is a completed signature statement (M15): licensed as a whole — its
 # identity is verified by recognizability, not the note-level melodic heuristics.
-CHROMATIC_ROLES = {"approach", "borrowed", "chromatic", "echo", "motif"}
+# "doubling" (C1) tracks the melody in the CHORD's melodic scale, so over a
+# borrowed chord it may leave the context scale exactly as its source note does
+# — _lint_doubling holds it to the tighter interval/membership whitelist.
+# "imitation" (C3) is a faithful cell entry licensed as a whole like "motif" —
+# lint_imitation verifies its identity by recognizability instead.
+CHROMATIC_ROLES = {"approach", "borrowed", "chromatic", "echo", "motif", "doubling",
+                   "imitation"}
 MOTIF_ROLE = "motif"
+DOUBLING_ROLE = "doubling"
+IMITATION_ROLE = "imitation"
 # Roles that license a non-chord tone (melodic embellishment, held pedal, a
 # prepared suspension, a signature statement). The obligation-bearing ones (pedal,
 # suspension) also have to *discharge* — see _lint_obligations (M14, §5.8).
-LICENSED_NONCHORD = CHROMATIC_ROLES | {"passing", "neighbor", "pedal", "appoggiatura", "suspension"}
+LICENSED_NONCHORD = CHROMATIC_ROLES | {"passing", "neighbor", "pedal", "appoggiatura",
+                                       "suspension"}
 SUSPENSION_ROLE, RESOLUTION_ROLE, PEDAL_ROLE, APPOGGIATURA_ROLE = (
     "suspension", "resolution", "pedal", "appoggiatura")
 
@@ -52,6 +61,9 @@ class LintLimits:
     leap_resolution_ratio: float = 0.9
     leap_semitones: int = 5  # intervals beyond this are leaps needing recovery
     drum_pitches: frozenset[int] = _DEFAULT_DRUM_PITCHES
+    counter_range: tuple[int, int] = (55, 79)  # C5: the tenor gap (G3..G5)
+    counter_consonance_ratio: float = 0.7      # strong beats consonant vs the melody
+    counter_overlap_ratio: float = 0.4         # non-downbeat onsets shared with the melody
 
 
 @dataclass(frozen=True)
@@ -109,6 +121,16 @@ def _lint_pad(events, ctx_by_bar, meter, limits, stage, out) -> None:
     pads = sorted((e for e in events if e.layer == "pad"), key=lambda e: (e.start, e.pitch))
     groups: dict[float, list[NoteEvent]] = {}
     for ev in pads:
+        if ev.role == IMITATION_ROLE:
+            # a C3 entry hosted by the pad rides ABOVE the voicing — range
+            # still applies, the voicing rules (unison/voice-move) don't:
+            # it is a figure, not a voice
+            lo_i, hi_i = limits.pad_range
+            if not lo_i <= ev.pitch <= hi_i:
+                out.append(Violation("pad-range", meter.bar_of(ev.start),
+                                     f"{pitch_name(ev.pitch)} outside pad range "
+                                     f"[{pitch_name(lo_i)}, {pitch_name(hi_i)}]"))
+            continue
         groups.setdefault(ev.start, []).append(ev)
 
     # Voicing analysis (unison doubling, voice movement) needs simultaneous
@@ -129,7 +151,10 @@ def _lint_pad(events, ctx_by_bar, meter, limits, stage, out) -> None:
             for ev in groups[start]:
                 if ev.pitch % 12 not in ctx.chord_pcs and ev.role not in LICENSED_NONCHORD:
                     out.append(Violation("chord-tone", bar, f"pad {pitch_name(ev.pitch)} is not a member of {ctx.chord_sym} (pcs {ctx.chord_pcs})"))
-        if voicing_rules and prev_pitches is not None and len(prev_pitches) == len(pitches):
+        # a lone pitch is a figure note (a C2 comping strike, an ornament's
+        # resolution), not a voicing — voice-leading is judged between chords
+        if (voicing_rules and prev_pitches is not None
+                and len(prev_pitches) == len(pitches) and len(pitches) >= 2):
             for i, (a, b) in enumerate(zip(prev_pitches, pitches)):
                 if abs(b - a) > limits.max_voice_move:
                     out.append(Violation(
@@ -169,14 +194,19 @@ def _lint_melody(events, ctx_by_bar, meter, limits, out) -> None:
         return
     lo, hi = limits.melody_range
     for ev in melody:
-        if not lo <= ev.pitch <= hi:
+        # the doubled line (C1) sits up to a 6th under the surface, so its
+        # floor extends by that interval; the surface note itself is bounded
+        floor = lo - 9 if ev.role == DOUBLING_ROLE else lo
+        if not floor <= ev.pitch <= hi:
             out.append(Violation("melody-range", meter.bar_of(ev.start),
                                  f"{pitch_name(ev.pitch)} outside melody range [{pitch_name(lo)}, {pitch_name(hi)}]"))
 
     # A completed signature statement is exempt from the constraint-first melodic
     # heuristics (strong-beat chord tones, leap recovery): its intervals are the
     # identity, licensed as a whole (M15). Its register is still bounded above.
-    tuneful = [e for e in melody if e.role != MOTIF_ROLE]
+    # Doubling (C1) is a shadow of the surface, not part of the line — sampling
+    # it would interleave fake leaps into the surface's triples.
+    tuneful = [e for e in melody if e.role not in (MOTIF_ROLE, DOUBLING_ROLE)]
     strong = set(meter.strong_slots())
     on_strong = [
         (e, ctx) for e in tuneful
@@ -213,6 +243,132 @@ def _lint_melody(events, ctx_by_bar, meter, limits, out) -> None:
             f"only {resolved}/{leaps} leaps beyond a P4 recover by an opposite step "
             f"({resolved / leaps:.2f} < {limits.leap_resolution_ratio})",
         ))
+
+
+def _lint_doubling(events, ctx_by_bar, meter, out) -> None:
+    """C1 doubling contract (REFINEMENT_PLAN): every role-"doubling" note is
+    simultaneous with a melody surface note a 3rd or 6th (or compound) above
+    it, and is a chord member on strong slots / a melodic-scale member on weak
+    ones — the whitelist the generator's post-pass obeys. Dormant on output
+    that emits no doubling."""
+    surface = [e for e in events if e.layer == "melody" and e.role != DOUBLING_ROLE]
+    strong = set(meter.strong_slots())
+    for d in (e for e in events if e.layer == "melody" and e.role == DOUBLING_ROLE):
+        bar = meter.bar_of(d.start)
+        src = next((m for m in surface
+                    if abs(m.start - d.start) < 1e-9 and m.pitch > d.pitch), None)
+        if src is None:
+            out.append(Violation("doubling", bar,
+                f"doubling {pitch_name(d.pitch)} has no simultaneous melody note above it"))
+            continue
+        if interval_class(d.pitch, src.pitch) not in (3, 4, 8, 9):
+            out.append(Violation("doubling", bar,
+                f"doubling {pitch_name(d.pitch)} is not a 3rd/6th below "
+                f"the melody's {pitch_name(src.pitch)}"))
+            continue
+        ctx = ctx_by_bar.get(bar)
+        if ctx is None or not ctx.chord_pcs:
+            continue
+        if meter.slot_of(d.start) in strong:
+            if d.pitch % 12 not in ctx.chord_pcs:
+                out.append(Violation("doubling", bar,
+                    f"strong-slot doubling {pitch_name(d.pitch)} is not a member of {ctx.chord_sym}"))
+        else:
+            mscale = ctx.chord.scale_for(ctx.scale) if ctx.chord else ctx.scale
+            if not mscale.contains(d.pitch) and d.pitch % 12 not in ctx.chord_pcs:
+                out.append(Violation("doubling", bar,
+                    f"doubling {pitch_name(d.pitch)} is neither a {mscale.name} tone "
+                    f"nor a member of {ctx.chord_sym}"))
+
+
+def _lint_counter(events, ctx_by_bar, meter, limits, out) -> None:
+    """C5 species set (REFINEMENT_PLAN): the countermelody stays in the tenor
+    gap and never above the sounding melody; its strong beats are chord
+    members and mostly consonant with the melody (3rds/6ths — P5/P8 exist but
+    are what the walk couldn't avoid); no consecutive/direct perfects against
+    melody OR bass; and its onsets live in the melody's holes (rhythmic
+    complementarity, downbeats exempt). Dormant on output with no counter
+    layer — pre-C5 renders are unaffected."""
+    counter = sorted((e for e in events if e.layer == "counter" and e.role != "echo"),
+                     key=lambda e: e.start)
+    if not counter:
+        return
+    melody = sorted((e for e in events if e.layer == "melody"
+                     and e.role not in (DOUBLING_ROLE, "echo")), key=lambda e: e.start)
+    bass = sorted((e for e in events if e.layer == "bass"), key=lambda e: e.start)
+    strong = set(meter.strong_slots())
+    lo, hi = limits.counter_range
+
+    def sounding(evs, t):
+        cur = None
+        for e in evs:
+            if e.start > t + 1e-9:
+                break
+            if t < e.end - 1e-9:
+                cur = e
+        return cur
+
+    melody_slots: dict[int, set[int]] = {}
+    for m in melody:
+        melody_slots.setdefault(meter.bar_of(m.start), set()).add(meter.slot_of(m.start))
+
+    consonant = total = overlap = weak_onsets = 0
+    vs_m: tuple[float, int, int] | None = None
+    vs_b: tuple[float, int, int] | None = None
+    for e in counter:
+        bar, slot = meter.bar_of(e.start), meter.slot_of(e.start)
+        if not lo <= e.pitch <= hi:
+            out.append(Violation("counter-range", bar,
+                f"{pitch_name(e.pitch)} outside counter range [{pitch_name(lo)}, {pitch_name(hi)}]"))
+        m = sounding(melody, e.start)
+        if m is not None and e.pitch > m.pitch:
+            out.append(Violation("counter-crossing", bar,
+                f"counter {pitch_name(e.pitch)} crosses above the melody's {pitch_name(m.pitch)}"))
+        if slot != 0:
+            weak_onsets += 1
+            if slot in melody_slots.get(bar, ()):
+                overlap += 1
+        if slot not in strong:
+            continue
+        ctx = ctx_by_bar.get(bar)
+        if ctx is not None and ctx.chord_pcs and e.pitch % 12 not in ctx.chord_pcs:
+            out.append(Violation("counter-chord-tone", bar,
+                f"strong-slot counter {pitch_name(e.pitch)} is not a member of {ctx.chord_sym}"))
+        if m is not None:
+            total += 1
+            consonant += interval_class(e.pitch, m.pitch) in CONSONANT
+            if vs_m is not None and e.start - vs_m[0] <= meter.bar_quarters + 1e-9:
+                if forbidden_parallel(vs_m[1], vs_m[2], e.pitch, m.pitch):
+                    out.append(Violation("counter-parallel", bar,
+                        f"consecutive perfects between counter and melody: "
+                        f"{pitch_name(vs_m[1])}/{pitch_name(vs_m[2])} -> "
+                        f"{pitch_name(e.pitch)}/{pitch_name(m.pitch)}"))
+                elif slot == 0 and forbidden_direct(vs_m[1], vs_m[2], e.pitch, m.pitch):
+                    out.append(Violation("counter-direct", bar,
+                        "direct perfect between counter and melody into the downbeat"))
+            vs_m = (e.start, e.pitch, m.pitch)
+        b = sounding(bass, e.start)
+        if b is not None:
+            if vs_b is not None and e.start - vs_b[0] <= meter.bar_quarters + 1e-9:
+                if forbidden_parallel(vs_b[2], vs_b[1], b.pitch, e.pitch):
+                    out.append(Violation("counter-parallel", bar,
+                        f"consecutive perfects between counter and bass: "
+                        f"{pitch_name(vs_b[1])}/{pitch_name(vs_b[2])} -> "
+                        f"{pitch_name(e.pitch)}/{pitch_name(b.pitch)}"))
+                elif slot == 0 and forbidden_direct(vs_b[2], vs_b[1], b.pitch, e.pitch):
+                    out.append(Violation("counter-direct", bar,
+                        "direct perfect between counter and bass into the downbeat"))
+            vs_b = (e.start, e.pitch, b.pitch)
+
+    if total >= 8 and consonant / total < limits.counter_consonance_ratio:
+        out.append(Violation("counter-consonance", -1,
+            f"only {consonant}/{total} strong-beat counter notes are consonant with the "
+            f"melody ({consonant / total:.2f} < {limits.counter_consonance_ratio})"))
+    if weak_onsets >= 10 and overlap / weak_onsets > limits.counter_overlap_ratio:
+        out.append(Violation("counter-overlap", -1,
+            f"{overlap}/{weak_onsets} off-downbeat counter onsets coincide with melody "
+            f"onsets ({overlap / weak_onsets:.2f} > {limits.counter_overlap_ratio}) — "
+            f"the counter should move in the melody's holes"))
 
 
 def _lint_perc(events, limits, meter, out) -> None:
@@ -363,7 +519,9 @@ def lint_groove(
         bar = meter.bar_of(ev.start)
         if ev.layer == "perc" and ev.role != "drum:crash":
             perc_pat.setdefault(bar, []).append((meter.slot_of(ev.start), ev.pitch, ev.velocity))
-        elif ev.layer == "arp" and ev.role != "echo":
+        elif ev.layer == "arp" and ev.role not in ("echo", IMITATION_ROLE):
+            # a C3 entry overlays the arp's register without re-rolling its
+            # pattern — the groove contract judges the figuration itself
             arp_pat.setdefault(bar, set()).add(meter.slot_of(ev.start))
 
     out: list[Violation] = []
@@ -407,7 +565,8 @@ def lint_outer(
     lint_groove — folded into lint() once the guard becomes the default."""
     bass = sorted((e for e in events if e.layer == "bass"), key=lambda e: e.start)
     melody = sorted((e for e in events if e.layer == "melody"
-                     and e.role not in (MOTIF_ROLE, "echo")), key=lambda e: e.start)
+                     and e.role not in (MOTIF_ROLE, DOUBLING_ROLE, "echo")),
+                    key=lambda e: e.start)
     strong = set(meter.strong_slots())
 
     def bass_at(t: float):
@@ -482,7 +641,7 @@ def lint_periods(
     onsets: dict[int, list[int]] = {}
     payoff_bars: set[int] = set()
     for ev in events:
-        if ev.layer == "melody":
+        if ev.layer == "melody" and ev.role != DOUBLING_ROLE:  # the question is the surface line
             onsets.setdefault(meter.bar_of(ev.start), []).append(meter.slot_of(ev.start))
             if ev.role == MOTIF_ROLE:  # a completed-signature statement (M15/M17)
                 payoff_bars.add(meter.bar_of(ev.start))
@@ -506,6 +665,118 @@ def lint_periods(
     return out
 
 
+def lint_texture(
+    events: Sequence[NoteEvent],
+    contexts: Sequence[HarmonicContext],
+    params_by_bar: dict,
+    meter: Meter = Meter(),
+) -> list[Violation]:
+    """C4 texture claims (REFINEMENT_PLAN): the Tier-2 texture state is
+    checkable against the sounding events, phrase by phrase — "doubled" means
+    doubling sounds (whenever the melody does), "imitative" means an entry
+    exists (whenever the melody layer was live at the entry bar), the lean
+    states mean NO polyphony sounds, and "monophonic" additionally thins the
+    pad to dyads. Dormant when params carry no texture (pre-C4 "" state).
+    Standalone like lint_groove; run on pre-modifier IR."""
+    ctx_by_bar = {c.bar: c for c in contexts}
+    phrases: dict[int, list[int]] = {}
+    for bar, ctx in ctx_by_bar.items():
+        phrases.setdefault((bar - ctx.phrase_pos) // max(1, ctx.phrase_bars), []).append(bar)
+    by_bar: dict[int, list[NoteEvent]] = {}
+    for ev in events:
+        by_bar.setdefault(meter.bar_of(ev.start), []).append(ev)
+
+    out: list[Violation] = []
+    for phrase, bars in sorted(phrases.items()):
+        bars.sort()
+        texs = {params_by_bar[b].texture for b in bars if b in params_by_bar}
+        if len(texs) != 1:
+            continue  # an override flipped mid-phrase — no phrase-level claim
+        tex = texs.pop()
+        if not tex:
+            continue
+        evs = [e for b in bars for e in by_bar.get(b, [])]
+        melody = [e for e in evs if e.layer == "melody" and e.role != DOUBLING_ROLE]
+        doubles = [e for e in evs if e.role == DOUBLING_ROLE]
+        imits = [e for e in evs if e.role == IMITATION_ROLE]
+        counter = [e for e in evs if e.layer == "counter"]
+        first = bars[0]
+        if tex == "doubled" and melody and not doubles:
+            out.append(Violation("texture", first,
+                f"phrase {phrase} claims 'doubled' but the melody sounds undoubled"))
+        elif tex == "imitative" and not imits:
+            entry_bar = bars[1] if len(bars) > 1 else None
+            p = params_by_bar.get(entry_bar)
+            if p is not None and "melody" in p.layers:
+                out.append(Violation("texture", first,
+                    f"phrase {phrase} claims 'imitative' but no entry sounds"))
+        elif tex == "counter" and not counter:
+            p = params_by_bar.get(first)
+            if p is not None and "counter" in p.layers:
+                out.append(Violation("texture", first,
+                    f"phrase {phrase} claims 'counter' but the layer is silent"))
+        elif tex in ("monophonic", "homophonic") and (doubles or imits or counter):
+            out.append(Violation("texture", first,
+                f"phrase {phrase} claims '{tex}' but polyphony sounds"))
+        if tex == "monophonic":
+            groups: dict[float, int] = {}
+            for e in evs:
+                if e.layer == "pad" and e.role != IMITATION_ROLE:
+                    groups[e.start] = groups.get(e.start, 0) + 1
+            fat = next((t for t, n in sorted(groups.items()) if n > 2), None)
+            if fat is not None:
+                out.append(Violation("texture", meter.bar_of(fat),
+                    f"monophonic phrase {phrase} voices a {groups[fat]}-note pad"))
+    return out
+
+
+def lint_imitation(
+    events: Sequence[NoteEvent],
+    contexts: Sequence[HarmonicContext],
+    cells: dict,
+    meter: Meter = Meter(),
+    *,
+    threshold: float = 0.9,
+) -> list[Violation]:
+    """C3 imitation contract (REFINEMENT_PLAN): the role-"imitation" events of
+    a phrase must reproduce that phrase's cached source cell — contour-delta
+    recognizability ≥ `threshold` in the entry bar's melodic scale.
+    Transposition preserves deltas, so a faithful entry scores 1.0 by
+    construction and a corrupted pitch drops below. Standalone like
+    lint_groove: `cells` is the engine's re-derivable per-phrase cache
+    (ConductorState.imitation_cells). Run on pre-modifier IR."""
+    from musicgen.gen.motif import recognizability
+
+    ctx_by_bar = {c.bar: c for c in contexts}
+    by_phrase: dict[int, list[NoteEvent]] = {}
+    for ev in events:
+        if ev.role == IMITATION_ROLE and ev.layer in ("arp", "pad"):
+            bar = meter.bar_of(ev.start)
+            ctx = ctx_by_bar.get(bar)
+            if ctx is None:
+                continue
+            phrase = (bar - ctx.phrase_pos) // max(1, ctx.phrase_bars)
+            by_phrase.setdefault(phrase, []).append(ev)
+
+    out: list[Violation] = []
+    for phrase, entry in sorted(by_phrase.items()):
+        entry.sort(key=lambda e: e.start)
+        bar = meter.bar_of(entry[0].start)
+        cell = cells.get(phrase)
+        if cell is None:
+            out.append(Violation("imitation", bar,
+                f"imitation events in phrase {phrase} without a recorded source cell"))
+            continue
+        ctx = ctx_by_bar[bar]
+        mscale = ctx.chord.scale_for(ctx.scale) if ctx.chord else ctx.scale
+        score = recognizability(cell, [e.pitch for e in entry], mscale)
+        if score < threshold:
+            out.append(Violation("imitation", bar,
+                f"imitation entry no longer carries its cell's contour "
+                f"(recognizability {score:.2f} < {threshold})"))
+    return out
+
+
 def lint(
     events: Sequence[NoteEvent],
     contexts: Sequence[HarmonicContext],
@@ -522,6 +793,8 @@ def lint(
     if stage == "pre":  # slot-based melodic + obligation analysis assumes the unmodified grid
         _lint_melody(events, ctx_by_bar, meter, limits, out)
         _lint_obligations(events, ctx_by_bar, meter, out)
+        _lint_doubling(events, ctx_by_bar, meter, out)
+        _lint_counter(events, ctx_by_bar, meter, limits, out)
     _lint_perc(events, limits, meter, out)
     _lint_cadences(contexts, out)
     return out

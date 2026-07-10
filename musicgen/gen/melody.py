@@ -235,11 +235,17 @@ class _OuterGuard:
     after a bar of silence, exactly like the linter's frame break."""
 
     def __init__(self, bass_events, bar_start: float, bar_len: float,
-                 prev: tuple[float, int, int] | None) -> None:
+                 prev: tuple[float, int, int] | None,
+                 prev_root: int | None = None) -> None:
         self.bass = [(e.start, e.end, e.pitch) for e in bass_events]
         self.bar_start = bar_start
         self.bar_len = bar_len
         self.prev = prev
+        self.prev2: tuple[float, int, int] | None = None  # the pair BEFORE the last observe
+        # the previous bar's realized downbeat bass — the cadence approach is
+        # judged root-to-root across the barline (lint_outer's yardstick), and
+        # the last strong PAIR may sit on a fifth or approach tone instead
+        self.prev_root = prev_root
 
     def bass_at(self, t: float) -> int | None:
         cur = None
@@ -276,7 +282,21 @@ class _OuterGuard:
         t = self.bar_start + slot * GRID
         bass = self.bass_at(t)
         if bass is not None:
+            self.prev2 = self.prev
             self.prev = (t, pitch, bass)
+
+    def clean_replacement(self, slot: int, pitch: int) -> bool:
+        """Would REPLACING the just-observed pick at `slot` with `pitch` keep
+        the frame clean? Judged against the pair before that observation
+        (prev2) — the introduce-tail nudge swaps the final note after _place
+        already observed it, so the current pair is the note being replaced."""
+        t = self.bar_start + slot * GRID
+        bass = self.bass_at(t)
+        if bass is None or self.prev2 is None or t - self.prev2[0] > self.bar_len + 1e-9:
+            return True
+        prev_m, prev_b = self.prev2[1], self.prev2[2]
+        return not (forbidden_parallel(prev_b, prev_m, bass, pitch)
+                    or (slot == 0 and forbidden_direct(prev_b, prev_m, bass, pitch)))
 
     def recovery_collides(self, slot: int, rec_pitch: int) -> bool:
         """Would a forced leap-recovery note at `slot` land a forbidden perfect?
@@ -295,6 +315,42 @@ class _OuterGuard:
 # musical emphasis only (cadence targets etc.) around velocity_center.
 _snap_to_scale = snap_to_scale
 _diatonic_shift = diatonic_shift
+
+DOUBLING_VELOCITY = -8  # C1: the doubled line sits under the surface dynamically too
+
+
+def _double_line(events: list[NoteEvent], ctx: HarmonicContext, meter: Meter) -> list[NoteEvent]:
+    """C1 parallel doubling (REFINEMENT_PLAN): a companion a diatonic 3rd below
+    each melody note, switching to a 6th where the 3rd is not a chord tone on a
+    strong slot — the cheapest polyphony there is, heard as richness rather
+    than a second voice, so it stays inside the melody layer at lower velocity.
+    A note whose double fits neither interval legally goes undoubled (the
+    cadence bar's appoggiatura lean stays solo); weak slots take the 3rd, which
+    is a melodic-scale member by construction."""
+    mscale = ctx.chord.scale_for(ctx.scale) if ctx.chord else ctx.scale
+    strong = set(meter.strong_slots())
+    doubles: list[NoteEvent] = []
+    for e in events:
+        # interval arithmetic, not scale walking: the source note may itself be
+        # chromatic (a chord tone of an applied dominant), and diatonic_shift
+        # would snap it first — landing the "3rd" a 5th below the real source
+        thirds, sixths = (e.pitch - 3, e.pitch - 4), (e.pitch - 8, e.pitch - 9)
+        third = next((p for p in thirds if mscale.contains(p)), None)
+        sixth = next((p for p in sixths if mscale.contains(p)), None)
+        if meter.slot_of(e.start) in strong:
+            cands = [p for p in (third, sixth) if p is not None and p % 12 in ctx.chord_pcs]
+            if not cands:  # chromatic chords: any chord-member 3rd/6th will do
+                cands = [p for p in (*thirds, *sixths) if p % 12 in ctx.chord_pcs]
+            pitch = cands[0] if cands else None
+        else:
+            pitch = third if third is not None else \
+                next((p for p in thirds if p % 12 in ctx.chord_pcs), None)
+        if pitch is None:
+            continue
+        doubles.append(NoteEvent(
+            e.start, e.dur, pitch, max(1, e.velocity + DOUBLING_VELOCITY), "melody",
+            degree=ctx.scale.degree_of(pitch), chord=ctx.chord_sym, role="doubling"))
+    return doubles
 
 
 def _velocity(params: MusicalParams, emphasis: int = 0) -> int:
@@ -409,6 +465,10 @@ def _introduce(motif, ctx, mscale, params, state, lo, hi, strong,
             # unrecovered (nothing recovers it — hanging is the point), so the
             # nudge stands down when no near instance exists
             pool = [p for p in cands if abs(p - prev) <= 5] or ([] if guard is not None else cands)
+        if pool and guard is not None and slot in strong:
+            # the nudge REPLACES the guarded pick — it must hold the same frame
+            # (judged against the pair before that pick's observation)
+            pool = [p for p in pool if guard.clean_replacement(slot, p)]
         if pool:
             placed[-1] = (slot, dur, min(pool, key=lambda p: (abs(p - last), p)))
             if guard is not None and slot in strong:
@@ -432,6 +492,8 @@ def generate_melody(
     apex: ApexPlan | None = None,
     bass: list[NoteEvent] | None = None,
     replay: tuple[tuple[int, int, int], ...] | None = None,
+    double: bool = False,
+    prev_bass: int | None = None,
 ) -> tuple[list[NoteEvent], MelodyState, str]:
     """One bar of melody. `lifecycle` stages the persistent `signature` (M15/M17)
     *positionally* within the phrase — the phrase keeps its own disposable `motif`,
@@ -466,12 +528,18 @@ def generate_melody(
     guard = None
     if cfg.counterpoint and bass:
         guard = _OuterGuard(bass, ctx.bar * meter.bar_quarters, meter.bar_quarters,
-                            state.prev_outer)
+                            state.prev_outer, prev_root=prev_bass)
 
     if pos.slot == "cadence" and ctx.cadence_policy:
-        if lifecycle == "completed":
-            return _cadence_statement(sig, ctx, meter, params, state, lo, hi)
-        return _cadence_bar(ctx, meter, params, state, lo, hi, rng, guard)
+        events, new_state, trace = (
+            _cadence_statement(sig, ctx, meter, params, state, lo, hi)
+            if lifecycle == "completed"
+            else _cadence_bar(ctx, meter, params, state, lo, hi, rng, guard))
+        if double and events:
+            dbl = _double_line(events, ctx, meter)
+            events += dbl
+            trace += f" │ doubled {len(dbl)}"
+        return events, new_state, trace
 
     rest_prob = max(0.0, cfg.bar_rest_max - params.note_density * 0.4)
     if (lifecycle != "completed" and not sig_event and not apex_bar and pos.slot == "free"
@@ -498,14 +566,25 @@ def generate_melody(
                 back = replay[1][2] - replay[0][2] if len(replay) > 1 else 0
                 ok = back != 0 and (back > 0) != (entry_iv > 0) and abs(back) <= 2
         if ok and guard is not None:
-            entry = next(((s, p) for s, d, p in replay if s in strong), None)
-            if entry is not None:
-                t = ctx.bar * meter.bar_quarters + entry[0] * GRID
-                bass_now, pair = guard.bass_at(t), guard._pair(t)
-                if bass_now is not None and pair is not None:
-                    prev_m, prev_b = pair
-                    ok = not (forbidden_parallel(prev_b, prev_m, bass_now, entry[1])
-                              or (entry[0] == 0 and forbidden_direct(prev_b, prev_m, bass_now, entry[1])))
+            # walk the outer-voice frame across the WHOLE replay, not just its
+            # entry: the answer plays over a freshly realized bass whose fifths
+            # and approach tones sit under different replay notes than they did
+            # under the antecedent's
+            pair = guard.prev
+            for s, _, p in replay:
+                if s not in strong:
+                    continue
+                t = ctx.bar * meter.bar_quarters + s * GRID
+                bass_now = guard.bass_at(t)
+                if bass_now is None:
+                    continue
+                if pair is not None and t - pair[0] <= meter.bar_quarters + 1e-9:
+                    prev_m, prev_b = pair[1], pair[2]
+                    if (forbidden_parallel(prev_b, prev_m, bass_now, p)
+                            or (s == 0 and forbidden_direct(prev_b, prev_m, bass_now, p))):
+                        ok = False
+                        break
+                pair = (t, p, bass_now)
         if ok:
             placed, anchor = list(replay), replay[0][2]
             op, shape, replayed = "period answer", "verbatim", True
@@ -565,10 +644,16 @@ def generate_melody(
             "melody", degree=ctx.scale.degree_of(pitch), chord=ctx.chord_sym, role=role,
         ))
 
+    doubled = ""
+    if double and events:
+        dbl = _double_line(events, ctx, meter)
+        events += dbl
+        doubled = f" │ doubled {len(dbl)}"
+
     new_state = MelodyState(prev_pitch=placed[-1][2] if placed else state.prev_pitch,
                             prev_anchor=anchor,
                             prev_outer=guard.prev if guard is not None else state.prev_outer)
-    return events, new_state, f"melody: {op} ({shape}) anchor {pitch_name(anchor)} n={len(placed)}"
+    return events, new_state, f"melody: {op} ({shape}) anchor {pitch_name(anchor)} n={len(placed)}{doubled}"
 
 
 def _cadence_target_pcs(ctx: HarmonicContext) -> tuple[int, ...]:
@@ -646,12 +731,16 @@ def _cadence_bar(
     direction = 1 if provisional > center else -1
     if guard is not None and state.prev_pitch is not None:
         bass_now = guard.bass_at(guard.bar_start)
-        pair = guard._pair(guard.bar_start)
-        if bass_now is not None and pair is not None and bass_now != pair[1]:
-            # step contrary to the bass's root arrival — the surface line (the
-            # lint's cadence yardstick) then descends into a rising bass and
-            # vice versa
-            direction = -1 if bass_now > pair[1] else 1
+        b_prev = guard.prev_root
+        if b_prev is None:  # direct callers without the conductor's thread
+            pair = guard._pair(guard.bar_start)
+            b_prev = pair[1] if pair is not None else None
+        if bass_now is not None and b_prev is not None and bass_now != b_prev:
+            # step contrary to the bass's root arrival, downbeat to downbeat —
+            # lint_outer's own yardstick (the last strong pair may sit on a
+            # fifth or an approach tone, whose direction says nothing about
+            # the harmonic arrival)
+            direction = -1 if bass_now > b_prev else 1
     first = _diatonic_shift(scale, center, direction) if state.prev_pitch is not None else \
         _diatonic_shift(scale, provisional, -direction)
     first = min(max(first, lo), hi)

@@ -1,15 +1,52 @@
 """Sustained voice-led pad chords (PLANS.md §5.3), with optional cadential
-suspensions the dramaturg deploys (§5.8, M14). Comping rhythm arrives with the
-M2 rhythm engine.
+suspensions the dramaturg deploys (§5.8, M14) and inner-voice animation
+(REFINEMENT_PLAN C2): instead of a static block, a **connective** bar walks one
+voice through a passing tone toward its next-bar pitch (the pad knows where it
+is going — the conductor passes the upcoming chord's pcs and the voicing
+optimizer is deterministic), and a **comping** bar breaks the voicing into a
+slow Alberti-adjacent figure on the pulse grid. The returned voicing is always
+the block target, so voice-leading memory and M14 preparation are untouched;
+an ornament (suspension/appoggiatura) owns the bar and animation stands down.
 """
 
 from __future__ import annotations
 
+import random
+from dataclasses import replace
+
+from musicgen.gen.rhythm import rough_cell
 from musicgen.ir import HarmonicContext, Meter, MusicalParams, NoteEvent
 from musicgen.theory.pitch import pitch_name
 from musicgen.theory.voicing import VoicingConfig, voice_chord
 
 PAD_VELOCITY_OFFSET = -6
+_COMPING_ORDER = (0, 2, 1, 3)  # low, mid-high, mid-low, top — Alberti-adjacent
+
+
+def _connective_voice(
+    voicing: tuple[int, ...], next_voicing: tuple[int, ...], ctx: HarmonicContext,
+) -> tuple[int, int] | None:
+    """(voice index, passing pitch) for the connective mode: the voice to
+    animate — preferring one moving by a 3rd (exactly one diatonic tone lies
+    between), then the highest — plus the scale tone strictly between its
+    current and next-bar pitch. None when no voice travels far enough or
+    nothing diatonic lies between (animation stands down to a block)."""
+    if len(next_voicing) != len(voicing):
+        return None
+    best: tuple[tuple[bool, int], int, int] | None = None
+    for i, (cur, nxt) in enumerate(zip(voicing, next_voicing)):
+        gap = abs(nxt - cur)
+        if gap < 2:
+            continue
+        between = [p for p in range(min(cur, nxt) + 1, max(cur, nxt))
+                   if ctx.scale.contains(p)]
+        if not between:
+            continue
+        mid = (cur + nxt) / 2
+        key = (gap in (3, 4), i)
+        if best is None or key > best[0]:
+            best = (key, i, min(between, key=lambda q: (abs(q - mid), q)))
+    return None if best is None else (best[1], best[2])
 
 
 def _suspension_pair(
@@ -66,16 +103,29 @@ def generate_pad(
     cfg: VoicingConfig,
     suspend: bool = False,
     appoggiatura: bool = False,
+    next_pcs: tuple[int, ...] | None = None,
+    animate: str = "",
+    rng: random.Random | None = None,
+    thin: bool = False,
 ) -> tuple[list[NoteEvent], tuple[int, ...], str]:
     """One bar of sustained chord. Returns (events, voicing, trace). A cadence
     ornament delays one voice — a prepared **suspension** where one is available,
     else (on the payoff) an unprepared **appoggiatura** — struck as a non-chord
     tone and resolving down by step at the mid-bar pulse. The returned voicing is
     still the resolved chord (so the next bar voice-leads — and prepares — from the
-    resolution)."""
+    resolution).
+
+    `animate` (C2, "" | "connective" | "comping") figurates an ornament-free
+    bar; `next_pcs` (root-first pcs of the upcoming chord) feeds the connective
+    preview, `rng` the comping figure. The returned voicing stays the block.
+    `thin` (C4 "monophonic") strips the voicing to a bare root+fifth dyad —
+    the leanest texture state, free of thirds entirely."""
     # Voicing wants root-first pcs for its doubling preferences; chord_pcs is
     # bass-first (equal unless inverted).
     pcs = ctx.chord.pitch_classes(ctx.scale) if ctx.chord else ctx.chord_pcs
+    if thin:
+        pcs = (pcs[0], pcs[2] if len(pcs) > 2 else pcs[0])
+        cfg = replace(cfg, voices=2)
     voicing, cost = voice_chord(pcs, prev_voicing, cfg)
     start, bar_len = ctx.bar * meter.bar_quarters, meter.bar_quarters
     velocity = max(1, min(127, params.velocity_center + PAD_VELOCITY_OFFSET))
@@ -92,6 +142,30 @@ def generate_pad(
         ornament = (*pair, "appoggiatura")
 
     trace = f"pad: voicing {voicing} cost {cost:.1f}"
+    if ornament is None and animate == "connective" and next_pcs:
+        nxt, _ = voice_chord(next_pcs, voicing, cfg)
+        pick = _connective_voice(voicing, nxt, ctx)
+        if pick is not None:
+            i, p = pick
+            walk_at = bar_len - meter.pulse_quarters  # the last pulse walks on
+            events = []
+            for j, pitch in enumerate(voicing):
+                if j == i:
+                    events.append(note(start, walk_at, pitch, ""))
+                    events.append(note(start + walk_at, bar_len - walk_at, p,
+                                       "" if p % 12 in set(ctx.chord_pcs) else "passing"))
+                else:
+                    events.append(note(start, bar_len, pitch, ""))
+            return events, voicing, trace + (
+                f" │ animate: {pitch_name(voicing[i])}-{pitch_name(p)} walks toward "
+                f"{pitch_name(nxt[i])}")
+    if ornament is None and animate == "comping" and rng is not None:
+        cell = rough_cell(rng, params.note_density, params.roughness,
+                          slots=meter.pulses, base_step=1)
+        events = [note(start + s * meter.pulse_quarters, d * meter.pulse_quarters,
+                       voicing[_COMPING_ORDER[j % len(_COMPING_ORDER)] % len(voicing)], "")
+                  for j, (s, d) in enumerate(cell)]
+        return events, voicing, trace + f" │ animate: comping n={len(events)}"
     if ornament is None:
         return [note(start, bar_len, pitch, "") for pitch in voicing], voicing, trace
 

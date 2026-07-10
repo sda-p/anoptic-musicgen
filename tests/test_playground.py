@@ -20,7 +20,7 @@ def test_schema_is_data_driven():
     assert "tempo_bpm" in s["overridable"] and "mode" in s["overridable"]
     assert any(f["name"] == "tempo_base" for f in s["mapping"])
     assert isinstance(s["console"], list)
-    assert s["layers"] == ["pad", "bass", "melody", "arp", "perc"]
+    assert s["layers"] == ["pad", "bass", "melody", "counter", "arp", "perc"]
     # modes are brightness-ordered dark -> bright
     assert [m["name"] for m in s["modes"]][0] == "phrygian"
     assert [m["name"] for m in s["modes"]][-1] == "lydian"
@@ -130,16 +130,21 @@ def test_perform_controls():
     p = st.snapshot()["perform"]  # all off by default -> byte-identical baseline
     assert p == {"shaping": False, "cadence_rit": 0.025, "phrase_groove": False,
                  "plan_apex": False, "counterpoint": False, "cadential_64": False,
-                 "periods": False, "hypermeter": False, "bass_inversions": False}
+                 "periods": False, "hypermeter": False, "bass_inversions": False,
+                 "doubling": False, "animate": False, "imitation": False,
+                 "rotate": False, "counter": False}
     engine = st._build_engine()
     assert engine.config.cadence_rit == 0.0 and not engine.config.phrase_groove
     assert not engine.config.melody.plan_apex and not engine.config.melody.counterpoint
-    from musicgen.gen.conductor import FormConfig
+    from musicgen.gen.conductor import FormConfig, TextureConfig
     assert engine.config.form == FormConfig()
+    assert engine.config.texture == TextureConfig()
 
     st.set_perform_fields({"shaping": True, "phrase_groove": True, "plan_apex": True,
                            "counterpoint": True, "cadence_rit": 0.03, "cadential_64": True,
-                           "periods": True, "hypermeter": True, "bass_inversions": True})
+                           "periods": True, "hypermeter": True, "bass_inversions": True,
+                           "doubling": True, "animate": True, "imitation": True,
+                           "rotate": True, "counter": True})
     engine = st._build_engine()
     from musicgen.modifiers import Perform
     assert any(isinstance(m, Perform) for m in engine.config.chains["melody"])
@@ -147,6 +152,9 @@ def test_perform_controls():
     assert engine.config.melody.plan_apex and engine.config.melody.counterpoint
     assert engine.config.form == FormConfig(cadential_64=True, periods=True,
                                             hypermeter=True, bass_inversions=True)
+    assert engine.config.texture == TextureConfig(doubling=True, animate=True,
+                                                  imitation=True, rotate=True,
+                                                  counter=True)
     st.set_perform_fields({"bogus_knob": 1.0})              # unknown field ignored, no crash
     assert "bogus_knob" not in st.snapshot()["perform"]
 

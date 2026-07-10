@@ -250,7 +250,7 @@ class RealtimeSynthPlayer:
                     self.engine.dramaturg = Dramaturg(command[1])
             elif command[0] == "perform":
                 from dataclasses import replace as _replace
-                from musicgen.gen.conductor import FormConfig
+                from musicgen.gen.conductor import FormConfig, TextureConfig
                 from musicgen.modifiers import default_chains
                 f, cfg = command[1], self.engine.config
                 cfg.chains = default_chains(perform=bool(f["shaping"]))
@@ -262,6 +262,11 @@ class RealtimeSynthPlayer:
                                       periods=bool(f["periods"]),
                                       hypermeter=bool(f["hypermeter"]),
                                       bass_inversions=bool(f["bass_inversions"]))
+                cfg.texture = TextureConfig(doubling=bool(f["doubling"]),
+                                            animate=bool(f["animate"]),
+                                            imitation=bool(f["imitation"]),
+                                            rotate=bool(f["rotate"]),
+                                            counter=bool(f["counter"]))
             elif command[0] == "key":
                 self.engine.request_key(command[1], urgent=command[2])
 

@@ -47,11 +47,11 @@ these waves start from a clean baseline.
 | B2 | Antecedent–consequent periods ✚ *(done)* | M | ★★★★★ | — | planner → spec |
 | B3 | Hypermetric weight ✚ *(done)* | S | ★★★ | — | no |
 | B4 | Bass-line planning (inversions, lament bass) ✚ *(done)* | M | ★★★★ | B1, A3 | no |
-| C1 | Parallel doubling in 3rds/6ths | S | ★★★ | A3 | no |
-| C2 | Inner-voice animation (pad figuration) | S–M | ★★★★ | — | no |
-| C3 | Imitation | M | ★★★★ | A3 | no |
-| C4 | Texture as a Tier-2 parameter | S–M | ★★★★ | ≥2 of C1–C3 | param set → spec |
-| C5 | Countermelody + guide-tone lines | L | ★★★★★ | A3, C4 | **yes** (new layer) |
+| C1 | Parallel doubling in 3rds/6ths ✚ *(done)* | S | ★★★ | A3 | no |
+| C2 | Inner-voice animation (pad figuration) ✚ *(done)* | S–M | ★★★★ | — | no |
+| C3 | Imitation ✚ *(done)* | M | ★★★★ | A3 | no |
+| C4 | Texture as a Tier-2 parameter ✚ *(done)* | S–M | ★★★★ | ≥2 of C1–C3 | param set → spec |
+| C5 | Countermelody + guide-tone lines ✚ *(done)* | L | ★★★★★ | A3, C4 | **yes** (new layer) |
 | D1 | `tie` flag: anacrusis, cross-bar suspensions | L | ★★★★ | — | **yes** (IR) |
 | D2 | PhraseClock: codetta / extension / elision | L | ★★★★ | B2 | **yes** (loop contract) |
 | D3 | Intra-bar harmonic rhythm (2 chords/bar) | XL | ★★★ | — | **yes** (context shape) |
@@ -301,7 +301,7 @@ The core ask. Ordered exactly as improvements.md ascends: doubling → inner-voi
 animation → imitation → texture parameter → countermelody. A3's
 `theory/counterpoint.py` underpins all of it.
 
-### C1. Parallel doubling in 3rds/6ths
+### C1. Parallel doubling in 3rds/6ths ✚ *(done; PLANS.md M23)*
 
 **Payoff ★★★ / Complexity S.** Cheapest polyphony in existence; reads as richness,
 not as a second voice — so it stays **inside the melody layer** (same channel/
@@ -319,7 +319,7 @@ patch, slightly lower velocity), no new-layer infrastructure.
 **Lint.** New rule: every doubling note is simultaneous with a melody note at a
 3rd/6th (or compound) below, chord/scale membership per the whitelist. Plant test.
 
-### C2. Inner-voice animation (figurated homophony)
+### C2. Inner-voice animation (figurated homophony) ✚ *(done; PLANS.md M23)*
 
 **Payoff ★★★★ / Complexity S–M.** Most of what registers as polyphony in media
 music. Directly attacks pad stasis at low energy — where the pad is often the only
@@ -343,7 +343,7 @@ layer sounding, so this is disproportionately audible.
 **Risk.** Interaction with suspensions: when `directive.suspend` fires, animation
 stands down for that bar (the ornament owns the pad's attention).
 
-### C3. Imitation
+### C3. Imitation ✚ *(done; PLANS.md M23)*
 
 **Payoff ★★★★ / Complexity M.** The listener hears the voices *listening to each
 other* — maximal intent per line of code. The machinery exists: motif cells,
@@ -367,7 +367,7 @@ other* — maximal intent per line of code. The machinery exists: motif cells,
 **Lint.** Imitation events must match the source cell's contour (reuse
 `recognizability` ≥ threshold at the entry's transposition). Plant test.
 
-### C4. Texture as a Tier-2 parameter
+### C4. Texture as a Tier-2 parameter ✚ *(done; PLANS.md M24)*
 
 **Payoff ★★★★ / Complexity S–M.** Texture change is the strongest variety lever
 human arrangers use, and it hands the dramaturg a new debt currency. Needs at
@@ -390,7 +390,7 @@ least two textures to exist (C1 + C2), hence its position.
 **Lint.** Texture claims are checkable: `doubled` ⇒ doubling events exist;
 `imitative` ⇒ an imitation entry exists in the phrase; etc. Cheap and honest.
 
-### C5. Countermelody generator + guide-tone lines
+### C5. Countermelody generator + guide-tone lines ✚ *(done; PLANS.md M24)*
 
 **Payoff ★★★★★ / Complexity L.** The polyphony capstone, and — in keeping with
 how everything in this project has been treated — its real deliverable is the
@@ -577,10 +577,12 @@ game side as planned.
 
 ## What must land before the C-engine spec freezes
 
-The spec's IR chapter needs **D1** (tie semantics), **C5** (final layer set),
-**C4** (final Tier-2 parameter list), and **D2** (whether phrase length is a
-constant or a scheduled clock — this changes the engine's phrase API). **D3**
-needs at least its decision record. **A3 + C5's linter rules** are the acceptance
-suite §13.3 promises the native implementation. Everything else (A1's constants,
+The spec's IR chapter needs **D1** (tie semantics), **C5** (final layer set —
+✚ *done*: six layers, "counter" landed with M24), **C4** (final Tier-2
+parameter list — ✚ *done*: `texture` joined MusicalParams), and **D2** (whether
+phrase length is a constant or a scheduled clock — this changes the engine's
+phrase API). **D3** needs at least its decision record. **A3 + C5's linter
+rules** are the acceptance suite §13.3 promises the native implementation —
+both landed (`lint_outer`, `_lint_counter`). Everything else (A1's constants,
 B-wave heuristics) ports as tuning, not architecture — it can keep evolving in the
 prototype after the spec drafts.

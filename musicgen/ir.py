@@ -15,7 +15,7 @@ from musicgen.theory.scales import Scale
 
 GRID = 0.25  # 16th-note grid, in quarter-note beats
 
-LAYER_NAMES = ("pad", "bass", "melody", "arp", "perc")
+LAYER_NAMES = ("pad", "bass", "melody", "counter", "arp", "perc")
 
 
 @dataclass(frozen=True)
@@ -165,6 +165,11 @@ class MusicalParams:
     harmonic_rhythm: float = 1.0  # chords per bar
     dissonance_budget: float = 0.0
     cadence_policy: str = "authentic"
+    texture: str = ""  # Tier-2 texture state (REFINEMENT_PLAN C4): "" (no texture
+    #                    system — pre-C4 behavior) | "monophonic" | "homophonic" |
+    #                    "doubled" | "imitative" | "counter". Phrase-quantized by
+    #                    the conductor's rotation; verify.lint_texture checks the
+    #                    claim each value makes about the sounding events.
     # (layer, patch) pairs, energy-tiered by the mapper. Patch names are
     # semantic; midi_io maps them to GM programs, synth/patches to voice
     # variants. Defaults are the calm tier (the original fixed sounds).

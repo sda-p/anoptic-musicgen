@@ -2,15 +2,16 @@ import { useMain } from "../store";
 import { api } from "../ws";
 import { ConstantsGrid } from "./ConstantsGrid";
 
-// Live controls for the performed surface (REFINEMENT_PLAN wave A / PLANS M19):
+// Live controls for the performed surface (REFINEMENT_PLAN waves A–C):
 // `shaping` inserts the deterministic Perform modifiers (velocity hairpin cresting
 // at the melodic apex, contour-tracking loudness, agogic phrase-open downbeats, a
 // luftpause before phrase downbeats, lay-back/push by density) plus the cadence
 // micro-ritardando whose depth is the one tunable knob; `phrase_groove` pins the
 // perc/arp pattern draws per phrase (A2 — pattern identity as a contract, fills
 // stay per-bar); `plan_apex` plans one melodic peak per phrase (A4 — every other
-// bar stays below it, gap-fill descent for free). Hot-swapped between bars, no
-// rebuild. All off by default, which is byte-identical to the unshaped engine.
+// bar stays below it, gap-fill descent for free). Wave C adds the polyphony
+// ladder: doubled 3rds/6ths, pad figuration, imitative entries. Hot-swapped
+// between bars, no rebuild. All off by default = byte-identical output.
 export function PerformControls() {
   const s = useMain();
   const shaping = Boolean(s.perform.shaping);
@@ -21,6 +22,11 @@ export function PerformControls() {
   const periods = Boolean(s.perform.periods);
   const hyper = Boolean(s.perform.hypermeter);
   const bassInv = Boolean(s.perform.bass_inversions);
+  const doubling = Boolean(s.perform.doubling);
+  const animate = Boolean(s.perform.animate);
+  const imitation = Boolean(s.perform.imitation);
+  const counter = Boolean(s.perform.counter);
+  const rotate = Boolean(s.perform.rotate);
   return (
     <div className="dramaturg-ctl">
       <div className="dramaturg-head">
@@ -105,6 +111,56 @@ export function PerformControls() {
         {bassInv
           ? "bass planning on · stepwise bass via inversions, lament grounds on odd buildups"
           : "bass planning off · the bass reports roots"}
+      </label>
+      <label className={`toggle toggle-sub ${doubling ? "on" : ""}`}>
+        <input
+          type="checkbox"
+          checked={doubling}
+          onChange={(e) => api.setPerform({ doubling: e.target.checked })}
+        />
+        {doubling
+          ? "doubling on · melody doubled in 3rds/6ths when bright & driving"
+          : "doubling off · the melody sings alone"}
+      </label>
+      <label className={`toggle toggle-sub ${animate ? "on" : ""}`}>
+        <input
+          type="checkbox"
+          checked={animate}
+          onChange={(e) => api.setPerform({ animate: e.target.checked })}
+        />
+        {animate
+          ? "pad animation on · passing tones when sparse, broken comping at mid energy"
+          : "pad animation off · block chords"}
+      </label>
+      <label className={`toggle toggle-sub ${imitation ? "on" : ""}`}>
+        <input
+          type="checkbox"
+          checked={imitation}
+          onChange={(e) => api.setPerform({ imitation: e.target.checked })}
+        />
+        {imitation
+          ? "imitation on · the phrase's cell echoed a bar later in a second voice"
+          : "imitation off · no answering voice"}
+      </label>
+      <label className={`toggle toggle-sub ${counter ? "on" : ""}`}>
+        <input
+          type="checkbox"
+          checked={counter}
+          onChange={(e) => api.setPerform({ counter: e.target.checked })}
+        />
+        {counter
+          ? "countermelody on · a second line in the tenor gap, guide-tone-seeded"
+          : "countermelody off · one line only"}
+      </label>
+      <label className={`toggle toggle-sub ${rotate ? "on" : ""}`}>
+        <input
+          type="checkbox"
+          checked={rotate}
+          onChange={(e) => api.setPerform({ rotate: e.target.checked })}
+        />
+        {rotate
+          ? "texture rotation on · phrase-by-phrase texture states, withheld & released by the dramaturg"
+          : "texture rotation off · enabled textures fire by affect"}
       </label>
       {shaping && s.performUi.length > 0 && (
         <ConstantsGrid

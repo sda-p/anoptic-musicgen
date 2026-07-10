@@ -38,7 +38,8 @@ def _hz(midi: int) -> float:
 @dataclass(frozen=True)
 class ConsoleConfig:
     layer_trim: tuple[tuple[str, float], ...] = (
-        ("pad", 0.60), ("bass", 0.85), ("melody", 0.70), ("arp", 0.55), ("perc", 0.95),
+        ("pad", 0.60), ("bass", 0.85), ("melody", 0.70), ("counter", 0.55),
+        ("arp", 0.55), ("perc", 0.95),
     )
     # per-strip 3-band EQ: (low_gain, mid_gain, high_gain, low_freq, high_freq),
     # linear gains — the classic channel-strip carve (bass owns the lows, pad
@@ -47,6 +48,7 @@ class ConsoleConfig:
         ("pad", (0.85, 1.00, 1.05, 260.0, 3200.0)),
         ("bass", (1.12, 1.00, 0.80, 180.0, 2200.0)),
         ("melody", (0.80, 1.05, 1.15, 220.0, 3600.0)),
+        ("counter", (0.85, 1.05, 0.95, 240.0, 3000.0)),  # warm mids, yields the air to the melody
         ("arp", (0.60, 1.00, 1.20, 300.0, 4800.0)),
         ("perc", (1.15, 0.95, 1.10, 120.0, 5000.0)),
     )
@@ -57,10 +59,12 @@ class ConsoleConfig:
     chorus_depth: float = 0.004    # seconds of modulation
     chorus_rates: tuple[float, float] = (0.6, 0.73)  # Hz, L/R decorrelation
     reverb_layer_send: tuple[tuple[str, float], ...] = (
-        ("pad", 1.00), ("bass", 0.10), ("melody", 0.75), ("arp", 0.90), ("perc", 0.30),
+        ("pad", 1.00), ("bass", 0.10), ("melody", 0.75), ("counter", 0.65),
+        ("arp", 0.90), ("perc", 0.30),
     )
     delay_layer_send: tuple[tuple[str, float], ...] = (
-        ("pad", 0.00), ("bass", 0.00), ("melody", 1.00), ("arp", 0.80), ("perc", 0.00),
+        ("pad", 0.00), ("bass", 0.00), ("melody", 1.00), ("counter", 0.30),
+        ("arp", 0.80), ("perc", 0.00),
     )
     duck_layers: tuple[str, ...] = ("pad", "arp")
     sidechain: str = "schedule"    # "schedule" | "detect" (envelope follower on perc)
@@ -205,7 +209,7 @@ class Console:
         # --- strips: trim -> 3-band EQ -> (chorus) -> (width) [duck applied later]
         self.strips: dict[str, object] = {}
         strip_outs: dict[str, object] = {}
-        for layer in ("pad", "bass", "melody", "arp", "perc"):
+        for layer in ("pad", "bass", "melody", "counter", "arp", "perc"):
             bus = sf.Bus(2)
             self.strips[layer] = bus
             out = bus * trims.get(layer, 0.7)
@@ -437,6 +441,9 @@ class Console:
             else:
                 node, total = patches.lead_voice(_hz(event.pitch), amp, dur_seconds,
                                                  self.cutoff_out, variant=patch or "soft")
+        elif event.layer == "counter":
+            node, total = patches.lead_voice(_hz(event.pitch), amp, dur_seconds,
+                                             self.cutoff_out, variant=patch or "mellow")
         elif patch == "chimes":
             node, total = patches.chime_voice(
                 event.pitch, _hz(event.pitch), amp, dur_seconds, self.cutoff_out)

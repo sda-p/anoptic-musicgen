@@ -29,15 +29,17 @@ from musicgen.control.mapping import MappingTable
 from musicgen.gen import structure
 from musicgen.gen.arp import ArpConfig, PATTERNS as ARP_PATTERNS, generate_arp, make_skips
 from musicgen.gen.bass import BassConfig, generate_bass
+from musicgen.gen.counter import CounterConfig, CounterState, generate_counter
 from musicgen.gen.dramaturg import Dramaturg, DramaturgConfig, Ledger, spend_magnitude
 from musicgen.gen.form import PeriodPlanner
+from musicgen.gen.imitation import generate_imitation
 from musicgen.gen.melody import (
     ApexPlan, MelodyConfig, MelodyState, Motif, generate_melody, make_apex,
     make_motif, make_signature,
 )
 from musicgen.gen.motif import MotifLifecycle
 from musicgen.gen.signatures import MotifDirector, SignatureMotif
-from musicgen.gen.pad import generate_pad
+from musicgen.gen.pad import PAD_VELOCITY_OFFSET, generate_pad
 from musicgen.gen.perc import Groove, PercConfig, generate_perc, make_groove
 from musicgen.ir import GRID, LAYER_NAMES, HarmonicContext, Meter, MusicalParams, NoteEvent
 from musicgen.modifiers import apply_chain, default_chains
@@ -92,6 +94,33 @@ class FormConfig:
     bass_inversions: bool = False  # B4: stepwise bass lines via first inversions
 
 
+@dataclass(frozen=True)
+class TextureConfig:
+    """Wave-C polyphony features (REFINEMENT_PLAN C1–C4), each off = byte-
+    identical. Hot-swappable live like FormConfig (all fields read per bar).
+    With `rotate` off, activation of the enabled features is affect-gated
+    where the plan calls for it (C1) or always-on (C3); with `rotate` on,
+    texture becomes a Tier-2 parameter — MusicalParams.texture — chosen per
+    phrase (rotation with memory, dramaturg-clamped while withholding) and the
+    features fire when their texture state is in force."""
+
+    doubling: bool = False   # C1: parallel 3rds/6ths inside the melody layer
+    animate: bool = False    # C2: pad figuration — connective passing tones /
+    #                          arpeggiated comping instead of a static block
+    imitation: bool = False  # C3: the phrase cell echoed in the arp register
+    #                          (top pad voice while the arp is withheld/gated)
+    rotate: bool = False     # C4: texture as a Tier-2 parameter — phrase-boundary
+    #                          rotation with memory over the enabled states
+    counter: bool = False    # C5: the countermelody layer — a second real line in
+    #                          the tenor gap, guide-tone-seeded, species-ruled
+
+
+# The texture ladder, lean -> rich (C4). Richness follows energy (tinted bright
+# by valence); the dramaturg withholds the rich end and releases it on a spend.
+_TEXTURES = ("monophonic", "homophonic", "doubled", "imitative", "counter")
+_TEXTURE_RETURN_PROB = 0.25  # chance a phrase revisits the texture of two ago
+
+
 @dataclass
 class EngineConfig:
     meter: Meter = field(default_factory=Meter)
@@ -112,12 +141,14 @@ class EngineConfig:
     phrase_groove: bool = False  # A2: pin perc/arp pattern draws per phrase — groove identity as
     #                              a contract; fills stay per-bar (off = per-bar rolls, byte-identical)
     form: FormConfig = field(default_factory=FormConfig)  # wave-B form features (B1–B4)
+    texture: TextureConfig = field(default_factory=TextureConfig)  # wave-C polyphony (C1–C3)
     mapper: MappingTable | None = None
     chains: dict[str, tuple] = field(default_factory=default_chains)  # {} disables modifiers
     harmony: HarmonyConfig = field(default_factory=HarmonyConfig)
     voicing: VoicingConfig = field(default_factory=VoicingConfig)
     bass: BassConfig = field(default_factory=BassConfig)
     melody: MelodyConfig = field(default_factory=MelodyConfig)
+    counter: CounterConfig = field(default_factory=CounterConfig)
     arp: ArpConfig = field(default_factory=ArpConfig)
     perc: PercConfig = field(default_factory=PercConfig)
 
@@ -133,11 +164,14 @@ class ConductorState:
     prev_voicing: tuple[int, ...] | None = None
     prev_bass_root: int | None = None
     melody: MelodyState = field(default_factory=MelodyState)
+    counter: CounterState = field(default_factory=CounterState)  # C5: the second line's memory
     motifs: dict[int, Motif] = field(default_factory=dict)
     grooves: dict[int, Groove] = field(default_factory=dict)          # A2: re-derivable per-phrase cache
     arp_skips: dict[int, frozenset[int]] = field(default_factory=dict)  # A2: ditto
     apexes: dict[int, ApexPlan] = field(default_factory=dict)         # A4: ditto
     planner: PeriodPlanner = field(default_factory=PeriodPlanner)     # B2: period commitments
+    imitation_cells: dict[int, Motif] = field(default_factory=dict)   # C3: cell echoed per phrase
+    phrase_textures: dict[int, str] = field(default_factory=dict)     # C4: re-derivable per-phrase cache
     inversion_run: int = 0                                            # B4: consecutive inverted bars
     lament_bars: set[int] = field(default_factory=set)                # B4: bars the ground owns
     motif_lifecycle: MotifLifecycle | None = None  # persistent signature (M15; None when disabled)
@@ -440,6 +474,82 @@ class MusicEngine:
             return True
         return self.affect.tension >= 0.25
 
+    def _wants_doubling(self, texture: str) -> bool:
+        """C1 activation: with the C4 texture parameter in force, the doubled
+        state IS the gate; without it, doubled 3rds/6ths read as warmth-plus-
+        drive, so the interim gate is bright AND energetic affect."""
+        if not self.config.texture.doubling:
+            return False
+        if texture:
+            return texture == "doubled"
+        return self.affect.valence > 0.3 and self.affect.energy > 0.55
+
+    def _texture_pool(self) -> list[str]:
+        """The texture states the enabled features can honestly claim (C4):
+        the lean pair is always available; each polyphony rung joins the pool
+        with its feature toggle."""
+        cfg = self.config.texture
+        pool = ["monophonic", "homophonic"]
+        if cfg.doubling:
+            pool.append("doubled")
+        if cfg.imitation:
+            pool.append("imitative")
+        if cfg.counter:
+            pool.append("counter")
+        return pool
+
+    def _texture_base(self, pool: list[str]) -> str:
+        """Affect-preferred texture: richness follows energy, tinted a step
+        richer when bright — the same shape as every other energy lever."""
+        a = self.affect
+        target = (a.energy - 0.15) / 0.75 * (len(_TEXTURES) - 1)
+        if a.valence > 0.3:
+            target += 0.5
+        target = max(0.0, min(float(len(_TEXTURES) - 1), target))
+        return min(pool, key=lambda t: (abs(_TEXTURES.index(t) - target), _TEXTURES.index(t)))
+
+    def _texture_for(self, pos: structure.PhrasePos, directive) -> tuple[str, str]:
+        """This phrase's texture state (C4), committed once per phrase and
+        cached like motifs. Precedence: an override pins it; the dramaturg
+        clamps to homophonic while withholding and releases the richest state
+        on the spend (texture as debt currency); a period's consequent keeps
+        the question's texture; otherwise rotation with memory — never the
+        same state twice running, occasionally returning to two phrases ago.
+        Returns (texture, trace note) — the note only on first commitment."""
+        state = self.state
+        phrase = pos.phrase
+        if phrase in state.phrase_textures:
+            return state.phrase_textures[phrase], ""
+        pool = self._texture_pool()
+        prev = state.phrase_textures.get(phrase - 1, "")
+        prev2 = state.phrase_textures.get(phrase - 2, "")
+        ov = self.overrides.get("texture")
+        if ov is not None:
+            tex, note = str(ov), "override"
+        elif directive is not None and directive.payoff > 0:
+            tex, note = max(pool, key=_TEXTURES.index), "spend releases the richest"
+        elif directive is not None and directive.withhold_root_tonic:
+            tex, note = "homophonic", "withheld with the rest"
+        elif (self.config.form.periods and state.planner.role(phrase) == "consequent"
+                and prev):
+            tex, note = prev, "the answer keeps the question's texture"
+        else:
+            base = self._texture_base(pool)
+            rng = self.seeder.stream("texture", phrase)
+            if (prev2 and prev2 != prev and prev2 != base and prev2 in pool
+                    and rng.random() < _TEXTURE_RETURN_PROB):
+                tex, note = prev2, f"return to two ago (last={prev or 'none'})"
+            elif base != prev:
+                tex, note = base, f"affect choice (last={prev or 'none'})"
+            else:
+                idx = _TEXTURES.index(base)
+                alts = sorted((t for t in pool if t != prev),
+                              key=lambda t: (abs(_TEXTURES.index(t) - idx), _TEXTURES.index(t)))
+                tex, note = (alts[0], f"rotation, never twice (last={prev})") if alts \
+                    else (base, "single-state pool")
+        state.phrase_textures[phrase] = tex
+        return tex, f"texture: {tex} ({note})"
+
     def _tonicize_target(self, pos: structure.PhrasePos) -> int:
         """Secondary-dominant deployment (§5.8, M14): at a sustained withholding
         phrase's pre-cadence, tonicize the deceptive target (vi) with an applied
@@ -699,6 +809,24 @@ class MusicEngine:
             params = replace(params, velocity_center=max(1, min(127,
                 params.velocity_center + round(6 * (hyper - 0.7)))))
 
+        # Texture as a Tier-2 parameter (C4): phrase-quantized rotation with
+        # memory over the enabled polyphony states; the dramaturg clamps it
+        # while withholding and releases the richest on the spend. An override
+        # pins it even without rotation.
+        texture_note = ""
+        if cfg.texture.rotate or "texture" in self.overrides:
+            tex, texture_note = self._texture_for(pos, directive)
+            params = replace(params, texture=tex)
+
+        # C5: the countermelody joins the ensemble as a texture state — when
+        # "counter" is in force (or, un-rotated, whenever there is energy
+        # enough to carry two lines) and there is a melody to counter.
+        if (cfg.texture.counter and "melody" in params.layers
+                and "counter" not in params.layers
+                and (params.texture == "counter" if (cfg.texture.rotate or params.texture)
+                     else self.affect.energy > 0.45)):
+            params = replace(params, layers=params.layers + ("counter",))
+
         # Motif lifecycle (§5.5, M15): a persistent signature advances at each
         # phrase boundary; the faithful statement is gated on a spend, fusing with
         # that phrase's cadence. Built once, down here so it reflects the LIVE
@@ -777,6 +905,8 @@ class MusicEngine:
             trace.append(dramaturg_note)
         if rit:
             trace.append(f"perform: cadence rit -{rit * 100:.1f}% (a tempo next bar)")
+        if texture_note:
+            trace.append(texture_note)
         if apex_note:
             trace.append(apex_note)
         if period_note:
@@ -825,11 +955,32 @@ class MusicEngine:
                 state.motif_director.age(pos.bars)
         layers = params.layers
         bass_events: list[NoteEvent] = []  # realized bass (A3: the melody's outer-voice guard reads it)
+        prev_bass_root = state.prev_bass_root  # last bar's realized downbeat (A3 cadence yardstick)
         if "pad" in layers:
+            # C2 inner-voice animation: connective passing tones when sparse,
+            # broken-figure comping at mid density, blocks when the other
+            # layers carry the motion. Stands down through the cadence zone of
+            # a dramaturg-controlled phrase — an M14 suspension is *prepared*
+            # by the previous bar's sounding voice, which a figurated bar
+            # cannot guarantee.
+            animate = ""
+            if cfg.texture.animate and params.texture != "monophonic":
+                suspension_zone = (self._dramaturg_on
+                                   and state.ledger.phrase_cadence.get(pos.phrase) is not None
+                                   and pos.pos >= pos.bars - 3)
+                if not suspension_zone:
+                    if params.note_density < 0.40:
+                        animate = "connective"
+                    elif params.note_density < 0.62:
+                        animate = "comping"
             pad_events, voicing, pad_trace = generate_pad(
                 ctx, cfg.meter, params, state.prev_voicing, cfg.voicing,
                 suspend=directive is not None and directive.suspend,
-                appoggiatura=directive is not None and directive.appoggiatura)
+                appoggiatura=directive is not None and directive.appoggiatura,
+                next_pcs=upcoming.pitch_classes(next_scale) if animate else None,
+                animate=animate,
+                rng=self.seeder.stream("pad", bar) if animate else None,
+                thin=params.texture == "monophonic")
             events.extend(pad_events)
             state.prev_voicing = voicing
             trace.append(pad_trace)
@@ -876,16 +1027,57 @@ class MusicEngine:
                 state.melody, mel_cfg, self.seeder.stream("melody", bar),
                 lifecycle=mel_lifecycle, signature=signature, apex=apex,
                 bass=bass_events, replay=replay,
+                double=self._wants_doubling(params.texture),
+                prev_bass=prev_bass_root,
             )
             events.extend(mel_events)
             state.melody = mel_state
             if cfg.form.periods and pos.pos == 0 and state.planner.role(pos.phrase) == "antecedent":
                 state.planner.opening_chord[pos.phrase] = chord
                 state.planner.opening_scale[pos.phrase] = self.scale
+                # the recorded question is the surface line — the consequent
+                # re-doubles its own replay if the texture still calls for it
                 state.planner.opening_melody[pos.phrase] = tuple(
-                    (cfg.meter.slot_of(e.start), round(e.dur / GRID), e.pitch) for e in mel_events)
+                    (cfg.meter.slot_of(e.start), round(e.dur / GRID), e.pitch)
+                    for e in mel_events if e.role != "doubling")
             tag = " │ signature" if sig_motif is not None else (f" │ motif {lifecycle_state}" if lifecycle_state else "")
             trace.append(mel_trace + tag)
+            # C3 imitation: one entry per phrase, the bar after the statement,
+            # echoing the cell the phrase actually carries — the signature when
+            # one is woven through it (the M15 "passed between layers" item
+            # landing for free), else the phrase's own motif. Hosted by the arp
+            # when it plays; by the pad's top voice while the dramaturg holds
+            # the arp hostage (the echo survives the withholding).
+            if (cfg.texture.imitation and pos.pos == 1
+                    and (not params.texture or params.texture == "imitative")
+                    and pos.phrase not in state.imitation_cells
+                    and ("arp" in layers or "pad" in layers)):
+                if "arp" in layers:
+                    imit_lo = (cfg.arp.base_octave + 1) * 12
+                    imit_hi = imit_lo + cfg.arp.span_octaves * 12
+                    host, imit_vel = "arp", params.velocity_center + cfg.arp.velocity_offset + 6
+                else:
+                    imit_hi = cfg.voicing.hi
+                    imit_lo = imit_hi - 15
+                    host, imit_vel = "pad", params.velocity_center + PAD_VELOCITY_OFFSET
+                imit_events, cell, imit_trace = generate_imitation(
+                    ctx, cfg.meter, params,
+                    signature if signature is not None else self._motif(pos.phrase, params),
+                    mel_events, host=host, lo=imit_lo, hi=imit_hi, velocity=imit_vel)
+                if imit_events:
+                    state.imitation_cells[pos.phrase] = cell
+                    events.extend(imit_events)
+                    trace.append(imit_trace)
+            # C5: the countermelody runs after the melody (whose bar IR it is
+            # constrained by) and the bass (whose motion it must not shadow
+            # in perfects) — complementary rhythm, guide-tone strong beats.
+            if "counter" in layers:
+                ctr_events, ctr_state, ctr_trace = generate_counter(
+                    ctx, cfg.meter, params, mel_events, bass_events,
+                    state.counter, cfg.counter, self.seeder.stream("counter", bar))
+                events.extend(ctr_events)
+                state.counter = ctr_state
+                trace.append(ctr_trace)
         if "arp" in layers:
             pattern_rng = self.seeder.stream("arp-pattern", pos.phrase)
             skips = None
@@ -899,6 +1091,17 @@ class MusicEngine:
                 ctx, cfg.meter, params, pattern_rng.choice(ARP_PATTERNS),
                 cfg.arp, self.seeder.stream("arp", bar), skips=skips,
             )
+            # a C3 entry in the arp register masks the bed notes it sounds
+            # over — same pitch, same channel: MIDI cannot voice both, and
+            # the ear hears only the entry anyway
+            imits = [e for e in events if e.layer == "arp" and e.role == "imitation"]
+            if imits:
+                before = len(arp_events)
+                arp_events = [a for a in arp_events
+                              if not any(i.pitch == a.pitch and a.start < i.end - 1e-9
+                                         and i.start < a.end - 1e-9 for i in imits)]
+                if len(arp_events) != before:
+                    arp_trace += f", {before - len(arp_events)} masked by imitation"
             events.extend(arp_events)
             trace.append(arp_trace)
         if "perc" in layers:

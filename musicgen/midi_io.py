@@ -24,10 +24,11 @@ class LayerSpec:
 
 
 LAYER_MIDI = {
-    "pad": LayerSpec(channel=0, program=89),    # Pad 2 (warm)
-    "bass": LayerSpec(channel=1, program=33),   # Electric Bass (finger)
-    "melody": LayerSpec(channel=2, program=11), # Vibraphone
-    "arp": LayerSpec(channel=3, program=46),    # Orchestral Harp
+    "pad": LayerSpec(channel=0, program=89),      # Pad 2 (warm)
+    "bass": LayerSpec(channel=1, program=33),     # Electric Bass (finger)
+    "melody": LayerSpec(channel=2, program=11),   # Vibraphone
+    "counter": LayerSpec(channel=4, program=71),  # Clarinet (C5 countermelody)
+    "arp": LayerSpec(channel=3, program=46),      # Orchestral Harp
     "perc": LayerSpec(channel=9, program=None),
 }
 
@@ -40,6 +41,7 @@ GM_PATCHES = {
     ("melody", "soft"): 11, ("melody", "hard"): 81,  # Vibraphone / Lead 2 (sawtooth)
     ("melody", "keys"): 8,                           # Celesta — sampled-bell analog
     ("arp", "pluck"): 46, ("arp", "glass"): 98,      # Orchestral Harp / FX 3 (crystal)
+    ("counter", "mellow"): 71, ("counter", "bowed"): 42,  # Clarinet / Cello (C5)
     # environmental / texture voices (DX-1413a): the synth backend is the real
     # thing (patches.py); these are the nearest GM analogs so the MIDI export
     # path still resolves a program (GM has no wind-chime or electrical-hum voice)
