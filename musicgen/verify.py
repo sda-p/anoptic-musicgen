@@ -58,6 +58,23 @@ PRE_CADENCE_DEGREES = {"authentic": (5, 7), "half": (2, 4), "deceptive": (5, 7)}
 _DEFAULT_DRUM_PITCHES = frozenset({36, 37, 38, 42, 45, 46, 47, 49, 50, 70})  # gen.perc.DRUMS
 
 
+def _grid_pos(start: float, meter: Meter) -> tuple[int, float]:
+    """The bar and in-bar offset a note is HARMONICALLY at. A modifier displaces
+    an onset by a fraction of a grid step — a strum's stagger, humanize's jitter,
+    swing — which can carry it backwards across a barline, or across a split
+    bar's mid-bar chord change. The note still belongs to the harmony it was
+    written against, so the harmonic rules resolve its position from the grid
+    slot it was displaced FROM, not from where the jitter left it.
+
+    Recovering that slot is exact as long as no modifier moves a note by half a
+    grid step (0.125 beats), which none does: the chain's largest displacements
+    (swing ~0.06, a strum stagger plus humanize ~0.05) stay well inside it. On
+    pre-modifier IR this is the identity — the "grid" rule enforces alignment."""
+    slot_start = round(start / GRID) * GRID
+    bar = meter.bar_of(slot_start)
+    return bar, slot_start - bar * meter.bar_quarters
+
+
 def _judged(contexts, horizon: int | None):
     """The bars the lint actually judges. Contexts at or beyond `horizon` are
     LOOKAHEAD: they exist so that an obligation planted inside the window can
@@ -101,7 +118,7 @@ class TheoryLintError(AssertionError):
 
 def _lint_events(events, ctx_by_bar, meter, stage, out) -> None:
     for ev in events:
-        bar = meter.bar_of(ev.start)
+        bar, _ = _grid_pos(ev.start, meter)
 
         if stage == "pre":
             for field_name, value in (("start", ev.start), ("dur", ev.dur)):
@@ -158,7 +175,7 @@ def _lint_pad(events, ctx_by_bar, meter, limits, stage, out) -> None:
     prev_pitches: list[int] | None = None
     for start in sorted(groups):
         pitches = [e.pitch for e in groups[start]]
-        bar = meter.bar_of(start)
+        bar, offset = _grid_pos(start, meter)
         if voicing_rules and any(b == a for a, b in zip(pitches, pitches[1:])):
             out.append(Violation("unison", bar, f"pad voicing doubles a unison: {[pitch_name(p) for p in pitches]}"))
         for p in pitches:
@@ -168,7 +185,7 @@ def _lint_pad(events, ctx_by_bar, meter, limits, stage, out) -> None:
         if ctx is not None and ctx.chord_pcs:
             pcs = ctx.chord_pcs
             if ctx.chords:  # D3: membership against the segment in force
-                chord_now = ctx.chord_at(start - bar * meter.bar_quarters)
+                chord_now = ctx.chord_at(offset)
                 if chord_now is not None:
                     pcs = chord_now.voiced_pcs(ctx.scale)
             for ev in groups[start]:
@@ -190,13 +207,13 @@ def _lint_pad(events, ctx_by_bar, meter, limits, stage, out) -> None:
 def _lint_bass(events, ctx_by_bar, meter, limits, out) -> None:
     lo, hi = limits.bass_range
     for ev in (e for e in events if e.layer == "bass"):
-        bar = meter.bar_of(ev.start)
+        bar, offset = _grid_pos(ev.start, meter)
         if not lo <= ev.pitch <= hi:
             out.append(Violation("bass-range", bar, f"{pitch_name(ev.pitch)} outside bass range [{pitch_name(lo)}, {pitch_name(hi)}]"))
         ctx = ctx_by_bar.get(bar)
         if ctx is None or not ctx.chord_pcs:
             continue
-        if meter.beat_in_bar(ev.start) == 1.0:
+        if offset == 0.0:  # the downbeat, as WRITTEN (a humanized onset still is one)
             if ev.pitch % 12 != ctx.chord_pcs[0] and ev.role not in LICENSED_NONCHORD:
                 # a pedal (held bass under shifting harmony) is a licensed non-root
                 # beat-1 bass; it carries a termination obligation instead (§5.8).
