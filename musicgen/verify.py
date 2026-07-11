@@ -10,6 +10,13 @@ target). Value-range checks live in NoteEvent.__post_init__.
 
 stage="pre" lints generator output (grid-aligned); stage="post" lints after
 modifiers, which may move events off-grid.
+
+`horizon` marks a TRUNCATED render: contexts at or beyond it are lookahead —
+they let an obligation planted in the last rendered bar discharge past the edge
+(a cadential 6/4 there resolves onto the V of the bar after) without themselves
+being judged, since they host no events. Render N + k bars, lint the events of
+the first N, pass every context, and set horizon=N. None (the default) judges
+every context, which is what a complete piece wants.
 """
 
 from __future__ import annotations
@@ -49,6 +56,17 @@ CADENCE_DEGREES = {"authentic": (1,), "half": (5,), "deceptive": (6,)}
 PRE_CADENCE_DEGREES = {"authentic": (5, 7), "half": (2, 4), "deceptive": (5, 7)}
 
 _DEFAULT_DRUM_PITCHES = frozenset({36, 37, 38, 42, 45, 46, 47, 49, 50, 70})  # gen.perc.DRUMS
+
+
+def _judged(contexts, horizon: int | None):
+    """The bars the lint actually judges. Contexts at or beyond `horizon` are
+    LOOKAHEAD: they exist so that an obligation planted inside the window can
+    discharge past its edge (a cadential 6/4 in the last rendered bar resolves
+    onto the V of the bar after), but they are never themselves the subject of
+    a rule — they host no events, so every event-shaped rule would misread
+    them. `horizon=None` judges everything, which is what a complete piece
+    wants."""
+    return [c for c in contexts if horizon is None or c.bar < horizon]
 
 
 @dataclass(frozen=True)
@@ -404,8 +422,8 @@ def _lint_perc(events, limits, meter, out) -> None:
                                  f"perc pitch {ev.pitch} not in the drum map"))
 
 
-def _lint_cadences(contexts, out) -> None:
-    for ctx in contexts:
+def _lint_cadences(contexts, out, horizon=None) -> None:
+    for ctx in _judged(contexts, horizon):
         if not ctx.cadence_slot or ctx.chord is None or not ctx.cadence_policy:
             continue
         if ctx.chord.applied:
@@ -423,7 +441,7 @@ def _lint_cadences(contexts, out) -> None:
             ))
 
 
-def _lint_obligations(events, ctx_by_bar, meter, out) -> None:
+def _lint_obligations(events, ctx_by_bar, meter, out, horizon=None) -> None:
     """M14 obligations-checking (§5.8): a planted structural dissonance must
     discharge. Dormant on output that plants none — no suspension/pedal roles and
     no context obligations means these loops find nothing, so pre-M14 renders are
@@ -489,7 +507,10 @@ def _lint_obligations(events, ctx_by_bar, meter, out) -> None:
                 f"does not terminate at a cadence"))
         i = j + 1
 
-    for bar, ctx in ctx_by_bar.items():
+    # obligations are PLANTED inside the window; ctx_by_bar reaches past it, so
+    # a promise made in the last rendered bar can still be kept by a lookahead
+    for ctx in _judged(ctx_by_bar.values(), horizon):
+        bar = ctx.bar
         if ctx.obligation.startswith("tonicize:"):
             target = int(ctx.obligation.split(":", 1)[1])
             nxt = ctx_by_bar.get(bar + 1)
@@ -510,7 +531,8 @@ def _lint_obligations(events, ctx_by_bar, meter, out) -> None:
 
     # B4: a lament ground (contiguous obligation "lament" bars) must reach the
     # dominant — its own last chord is degree 5, or the bar after it is.
-    lament = sorted(b for b, c in ctx_by_bar.items() if c.obligation == "lament")
+    lament = sorted(c.bar for c in _judged(ctx_by_bar.values(), horizon)
+                    if c.obligation == "lament")
     i = 0
     while i < len(lament):
         j = i
@@ -535,6 +557,8 @@ def lint_groove(
     contexts: Sequence[HarmonicContext],
     params_by_bar: dict,
     meter: Meter = Meter(),
+    *,
+    horizon: int | None = None,
 ) -> list[Violation]:
     """A2 groove-persistence contract (REFINEMENT_PLAN): within a phrase, under
     bar-to-bar-stable shaping params (density, roughness, dynamics, layer set),
@@ -544,7 +568,7 @@ def lint_groove(
     the phrase-open crash. Run on pre-modifier IR; standalone (needs per-bar
     params, which lint()'s inputs don't carry) — called by tests and demos, and
     by lint() itself once phrase_groove becomes the default."""
-    ctx_by_bar = {c.bar: c for c in contexts}
+    ctx_by_bar = {c.bar: c for c in _judged(contexts, horizon)}
     perc_pat: dict[int, list] = {}
     arp_pat: dict[int, set] = {}
     for ev in events:
@@ -585,6 +609,7 @@ def lint_outer(
     meter: Meter = Meter(),
     *,
     contrary_min: float = 0.5,
+    horizon: int | None = None,
 ) -> list[Violation]:
     """A3 outer-voice frame rules (REFINEMENT_PLAN): the soprano-bass pair at
     successive strong-slot melody onsets must not form consecutive perfects
@@ -634,7 +659,7 @@ def lint_outer(
                 f"{pitch_name(m1)} -> {pitch_name(m2)} in similar motion with the bass"))
 
     good = total = 0
-    for ctx in contexts:
+    for ctx in _judged(contexts, horizon):
         if ctx.cadence_slot != "cadence":
             continue
         if ctx.phrase_pos == 0:
@@ -665,6 +690,8 @@ def lint_periods(
     events: Sequence[NoteEvent],
     contexts: Sequence[HarmonicContext],
     meter: Meter = Meter(),
+    *,
+    horizon: int | None = None,
 ) -> list[Violation]:
     """B2 period contract (REFINEMENT_PLAN): a committed antecedent–consequent
     pair must answer — the consequent's opening bar carries the antecedent's
@@ -672,7 +699,7 @@ def lint_periods(
     moved window demands it). Cadence conformance per phrase is already the
     generic cadence rule's business, since ctx carries the forced policy.
     Standalone like lint_groove/lint_outer; run on pre-modifier IR."""
-    ctx_by_bar = {c.bar: c for c in contexts}
+    ctx_by_bar = {c.bar: c for c in _judged(contexts, horizon)}
     onsets: dict[int, list[int]] = {}
     payoff_bars: set[int] = set()
     for ev in events:
@@ -705,6 +732,8 @@ def lint_texture(
     contexts: Sequence[HarmonicContext],
     params_by_bar: dict,
     meter: Meter = Meter(),
+    *,
+    horizon: int | None = None,
 ) -> list[Violation]:
     """C4 texture claims (REFINEMENT_PLAN): the Tier-2 texture state is
     checkable against the sounding events, phrase by phrase — "doubled" means
@@ -713,7 +742,7 @@ def lint_texture(
     states mean NO polyphony sounds, and "monophonic" additionally thins the
     pad to dyads. Dormant when params carry no texture (pre-C4 "" state).
     Standalone like lint_groove; run on pre-modifier IR."""
-    ctx_by_bar = {c.bar: c for c in contexts}
+    ctx_by_bar = {c.bar: c for c in _judged(contexts, horizon)}
     # phrase identity = rank of the phrase's start bar — division by
     # phrase_bars breaks once the D2 clock schedules elastic segments
     starts = sorted({bar - ctx.phrase_pos for bar, ctx in ctx_by_bar.items()})
@@ -778,6 +807,7 @@ def lint_imitation(
     meter: Meter = Meter(),
     *,
     threshold: float = 0.9,
+    horizon: int | None = None,
 ) -> list[Violation]:
     """C3 imitation contract (REFINEMENT_PLAN): the role-"imitation" events of
     a phrase must reproduce that phrase's cached source cell — contour-delta
@@ -788,7 +818,7 @@ def lint_imitation(
     (ConductorState.imitation_cells). Run on pre-modifier IR."""
     from musicgen.gen.motif import recognizability
 
-    ctx_by_bar = {c.bar: c for c in contexts}
+    ctx_by_bar = {c.bar: c for c in _judged(contexts, horizon)}
     starts = sorted({bar - ctx.phrase_pos for bar, ctx in ctx_by_bar.items()})
     rank = {s: i for i, s in enumerate(starts)}  # elastic-segment-safe (D2)
     by_phrase: dict[int, list[NoteEvent]] = {}
@@ -826,8 +856,9 @@ def lint(
     *,
     stage: str = "pre",
     limits: LintLimits = LintLimits(),
+    horizon: int | None = None,
 ) -> list[Violation]:
-    ctx_by_bar = {c.bar: c for c in contexts}
+    ctx_by_bar = {c.bar: c for c in contexts}  # FULL: reaches into the lookahead
     out: list[Violation] = []
     _lint_events(events, ctx_by_bar, meter, stage, out)
     _lint_pad(events, ctx_by_bar, meter, limits, stage, out)
@@ -837,12 +868,12 @@ def lint(
         # note whose onset is its head — a tied-into downbeat is not an
         # attack, so it neither samples the strong-beat ratio nor fakes leaps
         _lint_melody(merge_ties(events), ctx_by_bar, meter, limits, out)
-        _lint_obligations(events, ctx_by_bar, meter, out)
+        _lint_obligations(events, ctx_by_bar, meter, out, horizon)
         _lint_doubling(events, ctx_by_bar, meter, out)
         _lint_counter(events, ctx_by_bar, meter, limits, out)
         _lint_ties(events, meter, out)
     _lint_perc(events, limits, meter, out)
-    _lint_cadences(contexts, out)
+    _lint_cadences(contexts, out, horizon)
     return out
 
 
@@ -853,7 +884,9 @@ def assert_clean(
     *,
     stage: str = "pre",
     limits: LintLimits = LintLimits(),
+    horizon: int | None = None,
 ) -> None:
-    violations = lint(events, contexts, meter, stage=stage, limits=limits)
+    violations = lint(events, contexts, meter, stage=stage, limits=limits,
+                      horizon=horizon)
     if violations:
         raise TheoryLintError(f"{len(violations)} violation(s):\n" + "\n".join(map(str, violations)))
