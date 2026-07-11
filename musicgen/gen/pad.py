@@ -23,6 +23,16 @@ PAD_VELOCITY_OFFSET = -6
 _COMPING_ORDER = (0, 2, 1, 3)  # low, mid-high, mid-low, top — Alberti-adjacent
 
 
+def thin_voicing(pcs, cfg: VoicingConfig):
+    """C4 "monophonic": strip root-first pcs to a bare root+fifth dyad, free of
+    thirds entirely, and hold the voicer to two voices. Returns (pcs, cfg).
+
+    Shared with the conductor's D3 split-6/4 bar, which voices its two half-bar
+    blocks itself instead of calling generate_pad — it must thin identically or
+    a monophonic phrase grows a four-note pad at its split bar."""
+    return (pcs[0], pcs[2] if len(pcs) > 2 else pcs[0]), replace(cfg, voices=2)
+
+
 def _connective_voice(
     voicing: tuple[int, ...], next_voicing: tuple[int, ...], ctx: HarmonicContext,
 ) -> tuple[int, int] | None:
@@ -137,8 +147,7 @@ def generate_pad(
     # bass-first (equal unless inverted).
     pcs = ctx.chord.pitch_classes(ctx.scale) if ctx.chord else ctx.chord_pcs
     if thin:
-        pcs = (pcs[0], pcs[2] if len(pcs) > 2 else pcs[0])
-        cfg = replace(cfg, voices=2)
+        pcs, cfg = thin_voicing(pcs, cfg)
     voicing, cost = voice_chord(pcs, prev_voicing, cfg)
     start, bar_len = ctx.bar * meter.bar_quarters, meter.bar_quarters
     velocity = max(1, min(127, params.velocity_center + PAD_VELOCITY_OFFSET))

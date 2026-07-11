@@ -1122,12 +1122,20 @@ class MusicEngine:
             # two voice-led half-bar blocks (I64 then V). Ornaments and
             # animation stand down; the harmonic motion IS the event.
             from musicgen.gen.pad import PAD_VELOCITY_OFFSET as _PVO
+            from musicgen.gen.pad import thin_voicing as _thin
             half = cfg.meter.bar_quarters / 2
             vel = max(1, min(127, params.velocity_center + _PVO))
-            v1, _ = voice_chord(chord.pitch_classes(self.scale), state.prev_voicing,
-                                cfg.voicing)
-            v2, _ = voice_chord(state.splits[bar].pitch_classes(self.scale), v1,
-                                cfg.voicing)
+            # C4 "monophonic" thins this bar exactly as it thins a generate_pad
+            # bar — the split path voices its own blocks, so it must apply the
+            # dyad rule itself or the phrase's leanest state grows a 4-note pad.
+            pcs1 = chord.pitch_classes(self.scale)
+            pcs2 = state.splits[bar].pitch_classes(self.scale)
+            vcfg = cfg.voicing
+            if params.texture == "monophonic":
+                pcs1, vcfg = _thin(pcs1, vcfg)  # voices=2 is idempotent, so
+                pcs2, vcfg = _thin(pcs2, vcfg)  # both blocks share vcfg
+            v1, _ = voice_chord(pcs1, state.prev_voicing, vcfg)
+            v2, _ = voice_chord(pcs2, v1, vcfg)
             for offset, voicing_now in ((0.0, v1), (half, v2)):
                 for pitch in voicing_now:
                     events.append(NoteEvent(
